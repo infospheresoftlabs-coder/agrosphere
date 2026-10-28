@@ -64,7 +64,8 @@ Open <http://localhost:8000>. Interactive API docs are at `/docs`.
 
 ### Demo accounts
 
-All demo accounts use the password `agro1234`.
+Demo accounts are for local development only and share the password `agro1234`.
+Never leave them in a public deployment — see "Removing demo accounts" below.
 
 | Role | Email |
 | --- | --- |
@@ -73,6 +74,27 @@ All demo accounts use the password `agro1234`.
 | Farm manager | `manager@agrosphere.in` |
 | Drone operator | `operator@agrosphere.in` |
 | Super admin | `admin@agrosphere.in` |
+
+### Removing demo accounts
+
+Before exposing an instance publicly, create a real administrator and purge the
+seeded accounts:
+
+```bash
+python3 -m backend.app.manage create-admin --email you@example.com --name "Your Name"
+python3 -m backend.app.manage purge-demo --reassign-to you@example.com --yes
+```
+
+Set `AGROSPHERE_SEED_ON_STARTUP=false` as well, otherwise the next restart
+recreates them. The `manage` CLI also supports `list`, `show <email>` (a dry-run
+of what deleting an account would touch) and `delete-user <email>`.
+
+Deletion is foreign-key safe: data the user owns (farms, fields, cases, media,
+jobs, invoices) is removed with them, while records that merely reference them
+(such as a case's assigned agronomist) are reassigned to the replacement
+account. Audit entries are de-identified rather than reassigned — attributing a
+deleted account's history to a living person would be false — and the hash chain
+is re-sealed so it still verifies.
 
 ## Tests
 
@@ -85,7 +107,17 @@ python3 scripts/e2e_test.py
 The suite exercises the real HTTP API — no mocks — and asserts authentication,
 RBAC denials, the full workflow, illegal transitions, drone simulation, payment
 idempotency, webhook signature rejection, report disclaimers, notification
-delivery evidence and audit-chain integrity. Expected result: **59 passed, 0 failed**.
+delivery evidence, audit-chain integrity and the registration privilege
+boundaries. Expected result: **65 passed, 0 failed**.
+
+Account deletion runs against a real database (PostgreSQL is preferred, because
+it enforces the foreign keys that SQLite ignores by default):
+
+```bash
+python3 scripts/test_users.py
+```
+
+Expected result: **22 passed, 0 failed**.
 
 ## The 18-step workflow
 

@@ -246,6 +246,29 @@ def main() -> int:
     check("verified knowledge sources exposed", status == 200 and len(knowledge) >= 5)
     check("knowledge has provenance", all(k.get("organization") for k in knowledge))
 
+    section("Registration privilege boundaries")
+    status, meta = call("GET", "/api/meta")
+    signup_roles = {r["key"] for r in (meta or {}).get("signup_roles", [])}
+    check("signup roles advertised", signup_roles == {"farmer", "agronomist", "farm_manager", "drone_operator"},
+          str(signup_roles))
+    check("super_admin not self-service", "super_admin" not in signup_roles)
+
+    status, esc = call("POST", "/api/auth/register", {
+        "email": "escalate-probe@example.com", "full_name": "Escalation Probe",
+        "password": "ProbePass123", "role": "super_admin",
+    })
+    check("self-registering as super_admin rejected", status == 403, f"{status} {esc}")
+
+    status, ok = call("POST", "/api/auth/register", {
+        "email": "selfservice-probe@example.com", "full_name": "Self Service",
+        "password": "ProbePass123", "role": "farmer",
+    })
+    check("self-registering as farmer allowed", status == 201, f"{status} {ok}")
+    if status == 201:
+        check("new farmer gets farmer role", ok.get("user", {}).get("role") == "farmer")
+        status, forbidden = call("GET", "/api/admin/users", token=ok.get("token"))
+        check("new farmer cannot reach admin users", status == 403, str(status))
+
     print(f"\n\033[1mResult:\033[0m {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

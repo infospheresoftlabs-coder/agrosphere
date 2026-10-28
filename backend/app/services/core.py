@@ -72,28 +72,70 @@ def record_audit(
     return event
 
 
+def _event_digest(
+    *, actor_id: str | None, action: str, entity: str, entity_id: str | None,
+    detail: dict | None, prev_hash: str, created_at,
+) -> str:
+    payload = {
+        "actor": actor_id,
+        "action": action,
+        "entity": entity,
+        "entity_id": entity_id,
+        "detail": detail or {},
+        "prev": prev_hash,
+        "ts": created_at.isoformat() if created_at else "",
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def verify_audit_chain(db: Session) -> dict:
     events = (
         db.execute(select(AuditEvent).order_by(AuditEvent.created_at.asc())).scalars().all()
     )
     prev = "0" * 64
     for ev in events:
-        payload = {
-            "actor": ev.actor_id,
-            "action": ev.action,
-            "entity": ev.entity,
-            "entity_id": ev.entity_id,
-            "detail": ev.detail or {},
-            "prev": prev,
-            "ts": ev.created_at.isoformat() if ev.created_at else "",
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, default=str).encode()
-        ).hexdigest()
+        digest = _event_digest(
+            actor_id=ev.actor_id,
+            action=ev.action,
+            entity=ev.entity,
+            entity_id=ev.entity_id,
+            detail=ev.detail,
+            prev_hash=prev,
+            created_at=ev.created_at,
+        )
         if ev.prev_hash != prev or ev.hash != digest:
             return {"valid": False, "broken_at": ev.id}
         prev = ev.hash
     return {"valid": True, "events": len(events)}
+
+
+def reseal_audit_chain(db: Session) -> dict:
+    """Recompute the hash chain in place after an event row was modified.
+
+    The chain commits to ``actor_id``, so de-identifying a deleted user's events
+    changes the digest and would otherwise report the whole trail as tampered.
+    This rewrites ``prev_hash``/``hash`` in creation order to match the current
+    values. Callers must only use it for an intentional, audited mutation, never
+    to paper over unexplained drift.
+    """
+    events = (
+        db.execute(select(AuditEvent).order_by(AuditEvent.created_at.asc())).scalars().all()
+    )
+    prev = "0" * 64
+    for ev in events:
+        ev.prev_hash = prev
+        ev.hash = _event_digest(
+            actor_id=ev.actor_id,
+            action=ev.action,
+            entity=ev.entity,
+            entity_id=ev.entity_id,
+            detail=ev.detail,
+            prev_hash=prev,
+            created_at=ev.created_at,
+        )
+        prev = ev.hash
+    db.flush()
+    return {"resealed": len(events), "head": prev}
 
 
 # --------------------------------------------------------------------------- #

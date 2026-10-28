@@ -23,6 +23,7 @@ from .config import settings
 from .constants import (
     LANGUAGES,
     ROLE_LABELS,
+    SELF_SERVICE_ROLES,
     STATE_OWNER,
     TRANSITIONS,
     CaseState,
@@ -256,6 +257,9 @@ def meta() -> dict:
     return {
         "version": __version__,
         "roles": [{"key": r.value, "label": ROLE_LABELS[r]} for r in Role],
+        "signup_roles": [
+            {"key": r.value, "label": ROLE_LABELS[r]} for r in SELF_SERVICE_ROLES
+        ],
         "languages": LANGUAGES,
         "states": [
             {"key": s.value, "owner": STATE_OWNER.get(s).value if STATE_OWNER.get(s) else None}
@@ -319,6 +323,12 @@ def images() -> dict:
 # --------------------------------------------------------------------------- #
 @app.post("/api/auth/register", tags=["Auth"], status_code=201)
 def register(payload: RegisterIn, db: Session = Depends(get_db)) -> dict:
+    if payload.role not in SELF_SERVICE_ROLES:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Role '{payload.role.value}' cannot be self-assigned. "
+            "An administrator must grant it.",
+        )
     if db.execute(select(User).where(User.email == payload.email)).scalars().first():
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
     user = User(

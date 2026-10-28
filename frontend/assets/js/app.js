@@ -81,7 +81,7 @@ function viewAuth() {
   const email = input('email', { type: 'email', placeholder: 'you@example.com', autocomplete: 'username' });
   const password = input('password', { type: 'password', placeholder: '••••••••', autocomplete: 'current-password' });
   const fullname = input('full_name', { placeholder: 'Your full name' });
-  const roleSel = select('role', (META?.roles || []).map(r => ({ value: r.key, label: r.label })));
+  const roleSel = select('role', (META?.signup_roles || META?.roles || []).map(r => ({ value: r.key, label: r.label })));
   const langSel = select('language', (META?.languages || []).map(l => ({ value: l.code, label: `${l.native} — ${l.name}` })));
 
   function drawCard() {

@@ -21,6 +21,13 @@ ROLE_LABELS = {
     Role.SUPER_ADMIN: "Super Administrator",
 }
 
+# Roles an anonymous visitor may claim when creating their own account.
+# Privileged roles are deliberately excluded: self-registration must never mint
+# an administrator. Super admin accounts are created out of band (see
+# ``python -m backend.app.manage create-admin``) and other privileged roles are
+# granted by an administrator.
+SELF_SERVICE_ROLES = (Role.FARMER, Role.AGRONOMIST, Role.FARM_MANAGER, Role.DRONE_OPERATOR)
+
 
 class CaseState(str, Enum):
     """Configurable lifecycle state machine for a crop-health case."""
