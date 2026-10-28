@@ -35,16 +35,30 @@ def _origins() -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+def _database_url() -> str:
+    """Resolve the database URL, normalising managed-provider formats.
+
+    Hosting platforms (Render, Railway, Heroku, Fly) hand out bare
+    ``postgres://`` or ``postgresql://`` connection strings. SQLAlchemy maps
+    those to psycopg2, which is not installed, so pin the driver explicitly.
+    """
+    raw = (
+        os.getenv("AGROSPHERE_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or "sqlite:///" + str(BACKEND_DIR / "agrosphere.db")
+    ).strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if raw.startswith(prefix):
+            return "postgresql+psycopg://" + raw[len(prefix) :]
+    return raw
+
+
 @dataclass(frozen=True)
 class Settings:
     environment: str = field(default_factory=lambda: os.getenv("AGROSPHERE_ENV", "development").strip().lower())
     seed_on_startup: bool = field(default_factory=lambda: _bool("AGROSPHERE_SEED_ON_STARTUP", False))
     cors_origins: list[str] = field(default_factory=_origins)
-    database_url: str = field(
-        default_factory=lambda: os.getenv(
-            "AGROSPHERE_DATABASE_URL", "sqlite:///" + str(BACKEND_DIR / "agrosphere.db")
-        )
-    )
+    database_url: str = field(default_factory=_database_url)
     # Set when the app is served behind a TLS-terminating proxy, so that
     # redirects and cookie/secure behaviour are generated with the right scheme.
     behind_proxy: bool = field(default_factory=lambda: _bool("AGROSPHERE_BEHIND_PROXY", False))

@@ -1,0 +1,32 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+#
+# Deploy with:  Render Dashboard -> New -> Blueprint -> pick this repo
+# Then set AGROSPHERE_SECRET_KEY (Render can generate it: sync: false + generateValue).
+#
+# Note: Render's free PostgreSQL expires after 30 days; use the paid plan for
+# anything long-lived.
+databases:
+  - name: agrosphere-db
+    databaseName: agrosphere
+    user: agrosphere
+    plan: free
+
+services:
+  - type: web
+    name: agrosphere
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: AGROSPHERE_ENV
+        value: production
+      - key: AGROSPHERE_SECRET_KEY
+        generateValue: true
+      - key: AGROSPHERE_SEED_ON_STARTUP
+        value: "true"
+      - key: AGROSPHERE_DATABASE_URL
+        fromDatabase:
+          name: agrosphere-db
+          property: connectionString
