@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Start server (development mode)
+        run: |
+          python -m backend.app.seed
+          python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/api/health && break
+            sleep 1
+          done
+
+      - name: Run end-to-end suite
+        run: python scripts/e2e_test.py http://127.0.0.1:8000
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t agrosphere:ci .
+
+      - name: Boot container and check health
+        run: |
+          docker run -d --name agro \
+            -e AGROSPHERE_SECRET_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')" \
+            -e AGROSPHERE_SEED_ON_STARTUP=true \
+            -p 8000:8000 agrosphere:ci
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8000/api/health; then ok=1; break; fi
+            sleep 2
+          done
+          test "${ok:-}" = "1" || { docker logs agro; exit 1; }
+
+      - name: Run end-to-end suite against the container
+        run: python scripts/e2e_test.py http://127.0.0.1:8000
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs agro
+
+  config-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Production must refuse a missing signing key
+        run: |
+          if AGROSPHERE_ENV=production python -c "import backend.app.security" 2>/dev/null; then
+            echo "::error::production started without AGROSPHERE_SECRET_KEY"; exit 1
+          fi
+
+      - name: Production must refuse a short signing key
+        run: |
+          if AGROSPHERE_ENV=production AGROSPHERE_SECRET_KEY=short \
+              python -c "import backend.app.security" 2>/dev/null; then
+            echo "::error::production accepted a weak AGROSPHERE_SECRET_KEY"; exit 1
+          fi
+
+      - name: Production must start with a strong signing key
+        run: |
+          AGROSPHERE_ENV=production \
+          AGROSPHERE_SECRET_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')" \
+            python -c "import backend.app.main"
