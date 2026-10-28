@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from .config import settings
 from .models import Base
 
-DATABASE_URL = os.getenv(
-    "AGROSPHERE_DATABASE_URL",
-    "sqlite:///" + os.path.join(os.path.dirname(os.path.dirname(__file__)), "agrosphere.db"),
-)
+DATABASE_URL = settings.database_url
 
-_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True)
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+# check_same_thread is a SQLite-only concern; pool_pre_ping keeps long-lived
+# connections healthy on managed databases that silently drop idle sessions.
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    pool_pre_ping=not _is_sqlite,
+    future=True,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 

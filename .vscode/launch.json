@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AgroSphere API (uvicorn)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["backend.app.main:app", "--reload", "--port", "8000"],
+      "jinja": true,
+      "justMyCode": false
+    },
+    {
+      "name": "Seed database",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "backend.app.seed",
+      "justMyCode": false
+    },
+    {
+      "name": "Run E2E suite",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/e2e_test.py",
+      "args": ["http://127.0.0.1:8000"],
+      "justMyCode": false
+    }
+  ]
+}

@@ -8,7 +8,6 @@ The API is fully documented at /docs (OpenAPI) and /redoc.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
@@ -20,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import __version__
+from .config import settings
 from .constants import (
     LANGUAGES,
     ROLE_LABELS,
@@ -85,20 +85,30 @@ app = FastAPI(
         "provider-independent AI analysis, drone mission simulation, payments "
         "and multilingual support."
     ),
+    # Interactive docs are handy in development and a needless surface in
+    # production, where the API is not a public playground.
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
+    openapi_url=None if settings.is_production else "/openapi.json",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("AGROSPHERE_CORS", "*").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    if settings.seed_on_startup:
+        from .seed import seed
+
+        seed()
 
 
 # --------------------------------------------------------------------------- #

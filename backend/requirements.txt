@@ -3,3 +3,5 @@ uvicorn[standard]>=0.30.0
 sqlalchemy>=2.0.30
 pydantic[email]>=2.7.0
 python-multipart>=0.0.9
+# PostgreSQL driver, required when AGROSPHERE_DATABASE_URL points at Postgres.
+psycopg[binary]>=3.1.0

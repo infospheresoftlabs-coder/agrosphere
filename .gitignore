@@ -10,3 +10,6 @@ venv/
 node_modules/
 .agent_tmp/
 workspace/
+
+# Locally generated development signing key — never commit.
+.dev-secret

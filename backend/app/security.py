@@ -12,9 +12,11 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
+from pathlib import Path
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -24,8 +26,61 @@ from .constants import Role
 from .db import get_db
 from .models import User
 
-SECRET_KEY = os.getenv("AGROSPHERE_SECRET_KEY", "dev-secret-change-me")
-TOKEN_TTL_SECONDS = 60 * 60 * 12
+log = logging.getLogger("agrosphere.security")
+
+ENVIRONMENT = os.getenv("AGROSPHERE_ENV", "development").strip().lower()
+IS_PRODUCTION = ENVIRONMENT in {"production", "prod"}
+MIN_SECRET_LENGTH = 32
+
+
+def _resolve_secret_key() -> str:
+    """Return the token-signing key, refusing to start insecurely in production.
+
+    A predictable signing key lets anyone mint a token for any account, so a
+    production deploy with no key configured must fail loudly rather than fall
+    back to a shared default. In development we generate a random key once and
+    persist it, so tokens survive a reload without shipping a known secret.
+    """
+    configured = os.getenv("AGROSPHERE_SECRET_KEY", "").strip()
+    if configured:
+        if IS_PRODUCTION and len(configured) < MIN_SECRET_LENGTH:
+            raise RuntimeError(
+                f"AGROSPHERE_SECRET_KEY must be at least {MIN_SECRET_LENGTH} characters "
+                "in production."
+            )
+        return configured
+
+    if IS_PRODUCTION:
+        raise RuntimeError(
+            "AGROSPHERE_SECRET_KEY is required when AGROSPHERE_ENV=production.\n"
+            "Generate one with:\n"
+            '  python3 -c "import secrets; print(secrets.token_urlsafe(48))"'
+        )
+
+    key_file = Path(
+        os.getenv("AGROSPHERE_SECRET_FILE", Path(__file__).resolve().parents[1] / ".dev-secret")
+    )
+    if key_file.exists():
+        persisted = key_file.read_text(encoding="utf-8").strip()
+        if persisted:
+            return persisted
+
+    generated = secrets.token_urlsafe(48)
+    try:
+        key_file.write_text(generated, encoding="utf-8")
+        key_file.chmod(0o600)
+    except OSError:  # read-only filesystem: keep the key in memory for this process
+        pass
+    log.warning(
+        "Generated a development signing key at %s. "
+        "Set AGROSPHERE_SECRET_KEY before deploying.",
+        key_file,
+    )
+    return generated
+
+
+SECRET_KEY = _resolve_secret_key()
+TOKEN_TTL_SECONDS = int(os.getenv("AGROSPHERE_TOKEN_TTL_SECONDS", 60 * 60 * 12))
 _PBKDF2_ROUNDS = 240_000
 
 bearer = HTTPBearer(auto_error=False)

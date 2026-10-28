@@ -1,0 +1,41 @@
+# Production-like stack: web + PostgreSQL.
+#
+#   AGROSPHERE_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(48))") \
+#     docker compose up --build
+#
+# The secret must be provided (never commit it). Generate one with the command
+# above, or put it in a .env file next to this file (git-ignored).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agrosphere
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agrosphere}
+      POSTGRES_DB: agrosphere
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrosphere -d agrosphere"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      AGROSPHERE_ENV: production
+      AGROSPHERE_SECRET_KEY: ${AGROSPHERE_SECRET_KEY:?set AGROSPHERE_SECRET_KEY to a 32+ char random value}
+      AGROSPHERE_DATABASE_URL: postgresql+psycopg://agrosphere:${POSTGRES_PASSWORD:-agrosphere}@db:5432/agrosphere
+      # Seed the demo dataset on first boot. Remove for a real deployment.
+      AGROSPHERE_SEED_ON_STARTUP: ${AGROSPHERE_SEED_ON_STARTUP:-true}
+      PORT: 8000
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    restart: unless-stopped
+
+volumes:
+  db_data:
