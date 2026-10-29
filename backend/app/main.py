@@ -31,7 +31,7 @@ from .constants import (
     CaseState,
     Role,
 )
-from .db import get_db, init_db
+from .db import SessionLocal, get_db, init_db
 from .models import (
     Analysis,
     AuditEvent,
@@ -128,6 +128,20 @@ def _startup() -> None:
         from .seed import seed
 
         seed()
+    else:
+        # Production runs with seeding off, so demo rows are never touched — but
+        # accounts created before the role->avatar map existed can still point at
+        # artwork that does not ship. Normalise them on every boot.
+        from .seed import _repair_role_avatars
+
+        db = SessionLocal()
+        try:
+            fixed = _repair_role_avatars(db)
+            if fixed:
+                db.commit()
+                print(f"Repaired {fixed} role avatar key(s).")
+        finally:
+            db.close()
 
 
 # --------------------------------------------------------------------------- #
