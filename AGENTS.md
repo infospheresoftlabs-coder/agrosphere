@@ -32,21 +32,40 @@ Two geocoding assertions fail without `GEOAPIFY_API_KEY` (503 by design — see
 ## Deploy
 
 Render service `agrosphere` (`srv-dbh80ogn74is73bo79qg`), blueprint in
-`render.yaml`, `autoDeploy: true`. In practice auto-deploy does **not** fire on
-push to `main`, and no deploy hook is stored in the repo or environment.
+`render.yaml`, `autoDeploy: true`. Auto-deploy does **not** fire on push to
+`main` — every live build so far was triggered manually or via the API. Trigger
+deploys with the Render API key and an explicit commit:
 
-To ship a change, one of these is required — ask the user:
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"clearCache":"clear","commitId":"<sha>"}' \
+  https://api.render.com/v1/services/srv-dbh80ogn74is73bo79qg/deploys
+```
 
-- a Render API key (`RENDER_API_KEY`), then
-  `POST https://api.render.com/v1/services/srv-dbh80ogn74is73bo79qg/deploys`
-  with body `{"clearCache": "do_not_clear"}`; or
-- the service's Deploy Hook URL (Render → service → Settings → Deploy Hook),
-  which can be `curl`ed; or
-- the user clicks **Manual Deploy** in the Render dashboard.
+`clearCache: "clear"` matters for frontend-only changes: the static assets are
+served from Render's edge cache, so a CSS/JS edit can report `live` while the
+old file is still served. Poll `.../deploys/<id>` until `status` is `live`.
+Other options: the service's Deploy Hook URL, or **Manual Deploy** in the
+dashboard.
 
 Verify a deploy landed by probing behaviour, not just `/api/health`:
 `curl -X PATCH .../api/admin/users/x` returns 405 before the edit route ships
-and 401/403 after. Check `git rev-parse origin/main` matches the deployed commit.
+and 401/403 after; for CSS, grep the served stylesheet for a string you added.
+
+### Production environment gotchas
+
+- `AGROSPHERE_SEED_ON_STARTUP=false` in production, so `seed()` never runs
+  there. Any repair that must reach existing rows has to live in the startup
+  hook's seeding-off branch (`backend/app/main.py::_startup`), not in `seed()`.
+- `img()` (`frontend/assets/js/core.js`) maps an avatar key straight to
+  `/images/<key>.jpg` with no fallback, so a stale key renders a broken image
+  rather than a placeholder. The role→artwork map is `ROLE_AVATARS` in
+  `backend/app/constants.py`; verify keys with
+  `curl -o /dev/null -w '%{http_code}' .../images/<key>.jpg`.
+- The Render Postgres instance is not reachable from the agent sandbox (TLS to
+  port 5432 is blocked), so production rows cannot be inspected directly — check
+  behaviour over HTTP instead.
 
 ## Layout
 
