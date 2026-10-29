@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .constants import DEMO_PASSWORD, Role
+from .constants import DEMO_PASSWORD, ROLE_AVATARS, Role
 from .db import SessionLocal, init_db
 from .models import (
     Analysis,
@@ -543,6 +543,27 @@ def _seed_cases(db: Session, users: dict[str, User], farm: Farm) -> None:
     )
 
 
+def _repair_role_avatars(db: Session) -> int:
+    """Point every account at the role artwork that actually ships.
+
+    Accounts created before the role->avatar mapping was made explicit can hold
+    keys such as ``role_farm_manager`` that have no image file. Normalising them
+    here means a deploy repairs the existing rows, not just new ones.
+    """
+    fixed = 0
+    for user in db.execute(select(User)).scalars().all():
+        try:
+            want = ROLE_AVATARS[Role(user.role)]
+        except (ValueError, KeyError):
+            continue
+        if user.avatar_image != want:
+            user.avatar_image = want
+            fixed += 1
+    if fixed:
+        db.flush()
+    return fixed
+
+
 def seed() -> None:
     init_db()
     db = SessionLocal()
@@ -551,6 +572,7 @@ def seed() -> None:
         _seed_catalog(db)
         farm = _seed_farm(db, users)
         _seed_cases(db, users, farm)
+        _repair_role_avatars(db)
         record_audit(
             db,
             actor=users["super_admin"],

@@ -87,7 +87,10 @@ button { font-family: inherit; }
 .auth-wrap {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 1.15fr .85fr;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  align-content: start;
+  padding: 26px 20px 34px;
 }
 .auth-hero {
   position: relative;
@@ -118,7 +121,10 @@ button { font-family: inherit; }
   background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .22);
   padding: 6px 12px; border-radius: 999px; font-size: .78rem; backdrop-filter: blur(6px);
 }
-.auth-panel { display: flex; align-items: center; justify-content: center; padding: 32px; }
+/* The about panel is taller than the viewport on phones and tablets. Let the
+   page scroll as one document instead of clipping the panel into a 100vh box,
+   which used to centre the sign-in card off the top of the screen. */
+.auth-panel { display: flex; align-items: center; justify-content: center; padding: 26px 18px; width: 100%; }
 .auth-card { width: 100%; max-width: 400px; }
 .auth-card .tabs { display: flex; gap: 6px; background: var(--surface-2); padding: 5px; border-radius: 12px; margin-bottom: 22px; }
 .auth-card .tabs button {
@@ -618,10 +624,6 @@ footer.app-footer {
 .auth-feature b { display: block; font-size: .78rem; color: #fff; margin-bottom: 2px; }
 .auth-feature span { font-size: .72rem; line-height: 1.4; opacity: .82; }
 
-/* With the about panel above it the form column needs to scroll on short
-   viewports rather than being clipped. */
-.auth-panel { align-items: center; overflow-y: auto; max-height: 100vh; padding: 26px 18px; }
-
 /* ---------------------------------------------------- language switcher */
 .lang-picker {
   width: auto; min-width: 74px; padding: 6px 8px; font-size: .82rem;
@@ -645,9 +647,17 @@ footer.app-footer {
   .auth-about-grid { grid-template-columns: repeat(2, 1fr); }
   .content { padding: 18px 16px; }
   .grid.c4 { grid-template-columns: repeat(2, 1fr); }
+  /* Wide data tables become horizontal scrollers so no column or row action is
+     clipped off the edge of a narrow screen. Thead and tbody keep their native
+     grouping (a shared min-width) so header and body columns stay aligned. */
+  .table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table > thead, .table > tbody { min-width: 560px; }
 }
 /* Phone: single column, sign-in module fills the width, controls stay tappable. */
 @media (max-width: 620px) {
+  .auth-wrap { padding: 14px 12px 26px; }
+  .auth-panel { padding: 0; }
+  .auth-about { border-radius: var(--radius); }
   .auth-about-body { padding: 20px 16px 22px; gap: 14px; }
   .auth-about-grid { grid-template-columns: 1fr; }
   .auth-signin { max-width: none; }
@@ -658,9 +668,12 @@ footer.app-footer {
   .lang-picker { min-width: 64px; }
   .media-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .btn, .btn.sm { padding: 9px 12px; }
+  .card { padding: 16px; }
+  .card-head { flex-wrap: wrap; }
 }
 @media (max-width: 420px) {
   .auth-brandline strong { font-size: 1.1rem; }
   .auth-about h2 { font-size: 1.2rem; }
   .table { font-size: .82rem; }
+  .table th, .table td { padding: 10px 11px; }
 }

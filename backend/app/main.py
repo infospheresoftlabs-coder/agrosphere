@@ -23,6 +23,7 @@ from . import __version__
 from .config import settings
 from .constants import (
     LANGUAGES,
+    ROLE_AVATARS,
     ROLE_LABELS,
     SELF_SERVICE_ROLES,
     STATE_OWNER,
@@ -291,6 +292,22 @@ class AdminUserCreateIn(BaseModel):
     verification_status: str = PField(default="pending", pattern="^(pending|verified|rejected)$")
 
 
+class AdminUserUpdateIn(BaseModel):
+    """Editable fields on an account, for the super-administrator module.
+
+    Every field is optional: only what the administrator supplies is changed.
+    ``password`` is separate from the self-service change so an administrator
+    can issue a new credential without knowing the old one.
+    """
+
+    email: EmailStr | None = None
+    full_name: str | None = PField(default=None, min_length=2, max_length=120)
+    phone: str | None = None
+    language: str | None = None
+    verification_status: str | None = PField(default=None, pattern="^(pending|verified|rejected)$")
+    password: str | None = PField(default=None, min_length=8, max_length=128)
+
+
 class MessageIn(BaseModel):
     body: str = PField(min_length=1, max_length=1000)
     channel: str = PField(default="whatsapp", pattern="^(whatsapp|sms)$")
@@ -492,7 +509,7 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> dict:
         role=payload.role.value,
         language=payload.language,
         phone=normalize_phone(payload.phone),
-        avatar_image=f"role_{payload.role.value}",
+        avatar_image=ROLE_AVATARS[payload.role],
         verification_status="pending",
     )
     db.add(user)
@@ -2316,7 +2333,7 @@ def admin_create_user(
         role=payload.role.value,
         language=payload.language,
         phone=normalize_phone(payload.phone),
-        avatar_image=f"role_{payload.role.value}",
+        avatar_image=ROLE_AVATARS[payload.role],
         verification_status=payload.verification_status,
     )
     db.add(created)
@@ -2358,7 +2375,7 @@ def set_user_role(
         return _user_out(target)
 
     target.role = payload.role.value
-    target.avatar_image = f"role_{payload.role.value}"
+    target.avatar_image = ROLE_AVATARS[payload.role]
     # A role change alters what the session may do; revoke existing sessions so
     # the new permissions take effect on the next sign-in rather than lingering.
     target.session_epoch = (target.session_epoch or 0) + 1
@@ -2369,6 +2386,82 @@ def set_user_role(
            category="account")
     db.commit()
     return _user_out(target)
+
+
+@app.patch("/api/admin/users/{user_id}", tags=["Administration"])
+def admin_update_user(
+    user_id: str,
+    payload: AdminUserUpdateIn,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Edit an account's profile, verification state or password.
+
+    Super-admin only and audited. Email uniqueness is enforced and a password
+    change revokes the target's other sessions (their token carries the old
+    session epoch), the same way a self-service reset does.
+    """
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+
+    changed: list[str] = []
+
+    if payload.email is not None and payload.email != target.email:
+        clash = db.execute(
+            select(User).where(User.email == payload.email, User.id != target.id)
+        ).scalars().first()
+        if clash:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        target.email = payload.email
+        changed.append("email")
+
+    if payload.full_name is not None and payload.full_name != target.full_name:
+        target.full_name = payload.full_name
+        changed.append("full_name")
+
+    if payload.language is not None and payload.language != target.language:
+        target.language = payload.language
+        changed.append("language")
+
+    if payload.verification_status is not None and payload.verification_status != target.verification_status:
+        target.verification_status = payload.verification_status
+        changed.append("verification_status")
+
+    if payload.phone is not None:
+        if payload.phone == "":
+            if target.phone is not None:
+                target.phone = None
+                changed.append("phone")
+        else:
+            normalized = normalize_phone(payload.phone)
+            if not normalized:
+                raise HTTPException(422, "That does not look like a valid mobile number")
+            if normalized != target.phone:
+                target.phone = normalized
+                changed.append("phone")
+
+    if payload.password is not None:
+        set_password(db, target, payload.password)
+        changed.append("password")
+
+    if not changed:
+        return _user_out(target)
+
+    record_audit(db, actor=user, action="user.updated_by_admin", entity="user",
+                 entity_id=target.id, detail={"fields": changed})
+    if "verification_status" in changed:
+        notify(db, user_id=target.id, title="Verification update",
+               body=f"Your professional verification is now '{target.verification_status}'.",
+               category="account")
+    db.commit()
+    out = _user_out(target)
+    # A password change bumps the session epoch, which would strand the
+    # administrator's own token. Hand back a fresh one so the session that made
+    # the change is not signed out by its own success.
+    if target.id == user.id and "password" in changed:
+        out["token"] = create_token(target)
+    return out
 
 
 @app.post("/api/admin/users/{user_id}/revoke-sessions", tags=["Administration"])

@@ -21,6 +21,17 @@ ROLE_LABELS = {
     Role.SUPER_ADMIN: "Super Administrator",
 }
 
+# Role artwork shipped in frontend/assets/images. Two role keys do not map
+# mechanically (farm_manager -> role_manager, super_admin -> role_admin), so the
+# mapping is explicit rather than derived from the role value.
+ROLE_AVATARS = {
+    Role.FARMER: "role_farmer",
+    Role.AGRONOMIST: "role_agronomist",
+    Role.FARM_MANAGER: "role_manager",
+    Role.DRONE_OPERATOR: "role_drone_operator",
+    Role.SUPER_ADMIN: "role_admin",
+}
+
 # Roles an anonymous visitor may claim when creating their own account.
 # Privileged roles are deliberately excluded: self-registration must never mint
 # an administrator. Super admin accounts are created out of band (see

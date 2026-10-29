@@ -1557,6 +1557,7 @@ async function viewAdmin(root) {
       el('td', {}, chip(u.role_label, 'blue')),
       el('td', {}, chip(titleCase(u.verification_status), u.verification_status === 'verified' ? 'green' : 'gold')),
       el('td', {}, el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
+        el('button', { class: 'btn ghost sm', onclick: () => editUserModal(u, () => viewAdmin(root.replaceChildren() || root)) }, 'Edit'),
         el('button', { class: 'btn ghost sm', onclick: () => roleModal(u, () => viewAdmin(root.replaceChildren() || root)) }, 'Change role'),
         u.verification_status !== 'verified'
           ? el('button', { class: 'btn sm', onclick: async () => {
@@ -1597,6 +1598,49 @@ async function viewAdmin(root) {
   dzRow.appendChild(el('button', { class: 'btn danger', onclick: () => purgeModal(() => viewAdmin(root.replaceChildren() || root)) }, 'Purge all captured data'));
   dz.appendChild(dzRow);
   root.appendChild(dz);
+}
+
+function editUserModal(u, done) {
+  const email = input('email', { type: 'email', placeholder: 'name@example.com', value: u.email });
+  const fullname = input('full_name', { placeholder: 'Full name', value: u.full_name });
+  const phoneIn = input('phone', { type: 'tel', placeholder: 'e.g. 98765 43210 (optional)', value: u.phone || '' });
+  const langSel = select('language', (META?.languages || []).map(l => ({ value: l.code, label: `${l.native} — ${l.name}`, selected: l.code === u.language })));
+  const verifySel = select('verification_status', [
+    { value: 'pending', label: 'Pending', selected: u.verification_status === 'pending' },
+    { value: 'verified', label: 'Verified', selected: u.verification_status === 'verified' },
+    { value: 'rejected', label: 'Rejected', selected: u.verification_status === 'rejected' },
+  ]);
+  const password = input('password', { type: 'password', placeholder: 'Leave blank to keep current', autocomplete: 'new-password' });
+  const isSelf = u.id === ME.id;
+  const body = el('div', {},
+    el('div', { class: 'alert info' }, `Edit ${u.full_name} (${u.email}). Only the fields you change are saved, and the change is recorded in the audit trail.`),
+    field('Email', email), field('Full name', fullname),
+    el('div', { class: 'grid c2' }, field('Verification', verifySel), field('Preferred language', langSel)),
+    field('Mobile number', phoneIn, 'Optional. Used for SMS and WhatsApp notifications. Clear the field to remove it.'),
+    field('New password', password, isSelf
+      ? 'Optional. Changing your own password keeps this session signed in.'
+      : 'Optional. Setting a password signs the user out of all other devices.'),
+  );
+  const m = modal({
+    title: 'Edit user', body, wide: true,
+    footer: [
+      el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+      el('button', { class: 'btn', onclick: async () => {
+        const payload = {
+          email: email.value.trim(), full_name: fullname.value.trim(),
+          phone: phoneIn.value.trim(), language: langSel.value,
+          verification_status: verifySel.value,
+        };
+        if (password.value) payload.password = password.value;
+        try {
+          const res = await api(`/admin/users/${u.id}`, { method: 'PATCH', body: payload });
+          // Editing your own password returns a fresh token so this session survives.
+          if (res.token) { const { token, ...me } = res; setSession(token, me); ME = me; }
+          toast('User updated'); m.close(); done();
+        } catch (e) { toast(e.message, 'error'); }
+      } }, 'Save changes'),
+    ],
+  });
 }
 
 function deleteUserModal(u, done) {
