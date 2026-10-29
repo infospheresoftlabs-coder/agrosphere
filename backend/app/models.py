@@ -60,10 +60,32 @@ class User(Base, TimestampMixin):
     verification_status: Mapped[str] = mapped_column(String(16), default="pending")
     credentials: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     consent: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Bumped whenever credentials change. Session tokens carry the epoch they
+    # were minted with, so a password reset or an administrative revocation
+    # invalidates every other session without needing a server-side token store.
+    session_epoch: Mapped[int] = mapped_column(Integer, default=0)
 
     farms: Mapped[list["Farm"]] = relationship(
         back_populates="owner", foreign_keys="Farm.owner_id"
     )
+
+
+class PasswordResetToken(Base, TimestampMixin):
+    """A single-use, expiring credential for the forgot-password flow.
+
+    Only the SHA-256 of the token is stored, so a database read cannot be
+    replayed as a reset. ``used_at`` marks consumption: a token is dead once
+    used, expired, or superseded by a newer request for the same account.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Farm(Base, TimestampMixin):
@@ -375,3 +397,59 @@ class IdempotencyRecord(Base, TimestampMixin):
     key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     endpoint: Mapped[str] = mapped_column(String(120))
     response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class LocationPing(Base, TimestampMixin):
+    """A single position report from a field actor (person, phone or drone).
+
+    Pings are append-only: the newest ping per actor is the live position, and
+    the ordered set forms the track shown on the map. ``accuracy_m`` and
+    ``speed_ms`` come straight from the device and are stored so a dispatcher can
+    judge how much to trust a fix.
+    """
+
+    __tablename__ = "location_pings"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    farm_id: Mapped[str | None] = mapped_column(ForeignKey("farms.id"), nullable=True, index=True)
+    field_id: Mapped[str | None] = mapped_column(ForeignKey("fields.id"), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True, index=True)
+    # person | drone
+    source: Mapped[str] = mapped_column(String(16), default="person")
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    accuracy_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    altitude_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    heading_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    speed_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    battery_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recorded_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+
+
+class LiveSession(Base, TimestampMixin):
+    """A live video capture session from a phone or a drone.
+
+    Frames are not stored server-side; the row records who was streaming, from
+    where, and the geotag of the last frame, so the map can show a live marker
+    and the case can keep a provenance record of the capture.
+    """
+
+    __tablename__ = "live_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    farm_id: Mapped[str | None] = mapped_column(ForeignKey("farms.id"), nullable=True)
+    field_id: Mapped[str | None] = mapped_column(ForeignKey("fields.id"), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("cases.id"), nullable=True)
+    # phone | drone
+    device: Mapped[str] = mapped_column(String(16), default="phone")
+    status: Mapped[str] = mapped_column(String(16), default="live")  # live|ended
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frames: Mapped[int] = mapped_column(Integer, default=0)
+    geotagged_frames: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+    ended_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -63,6 +63,28 @@ class Settings:
     # redirects and cookie/secure behaviour are generated with the right scheme.
     behind_proxy: bool = field(default_factory=lambda: _bool("AGROSPHERE_BEHIND_PROXY", False))
     workers: int = field(default_factory=lambda: _int("AGROSPHERE_WORKERS", 1))
+    # Absolute base URL used in outbound links (password-reset emails). Falls
+    # back to the provider-injected URL so a managed deploy works unconfigured.
+    public_base_url: str = field(
+        default_factory=lambda: (
+            os.getenv("AGROSPHERE_PUBLIC_BASE_URL", "").strip()
+            or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        )
+    )
+    # Geoapify powers map tiles, forward/reverse geocoding and routing. The key
+    # is a public, referrer-restricted browser key, so it is served to the
+    # frontend through /api/meta; server-side calls use the same key.
+    geoapify_api_key: str = field(
+        default_factory=lambda: os.getenv("GEOAPIFY_API_KEY", "").strip()
+    )
+    # Leaflet + OpenStreetMap tiles are used when no Geoapify key is present, so
+    # the map still works (minus geocoding/routing) before a key is configured.
+    maps_provider: str = field(
+        default_factory=lambda: (
+            os.getenv("AGROSPHERE_MAPS_PROVIDER", "").strip()
+            or ("geoapify" if os.getenv("GEOAPIFY_API_KEY", "").strip() else "openstreetmap")
+        )
+    )
 
     @property
     def is_production(self) -> bool:

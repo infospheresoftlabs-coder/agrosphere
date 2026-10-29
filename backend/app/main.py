@@ -8,11 +8,12 @@ The API is fully documented at /docs (OpenAPI) and /redoc.
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field as PField
 from sqlalchemy import func, select
@@ -43,6 +44,8 @@ from .models import (
     Invoice,
     Job,
     KnowledgeSource,
+    LiveSession,
+    LocationPing,
     MediaAsset,
     Notification,
     Product,
@@ -60,6 +63,7 @@ from .security import (
 )
 from .services import ai as ai_service
 from .services import geo
+from .services import weather as weather_service
 from .services.core import (
     create_invoice,
     idempotent,
@@ -71,6 +75,15 @@ from .services.core import (
     transition_case,
     verify_audit_chain,
     verify_webhook,
+)
+from .services.mail import send_password_reset, smtp_configured
+from .services.reports import build_case_pdf
+from .services.passwords import (
+    RESET_TTL_MINUTES,
+    consume_reset_token,
+    issue_reset_token,
+    resolve_reset_token,
+    set_password,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -244,6 +257,108 @@ class FlagIn(BaseModel):
     enabled: bool
 
 
+class PasswordResetRequestIn(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmIn(BaseModel):
+    token: str = PField(min_length=10, max_length=200)
+    new_password: str = PField(min_length=8, max_length=128)
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = PField(min_length=8, max_length=128)
+
+
+class RoleUpdateIn(BaseModel):
+    role: Role
+    reason: str | None = None
+
+
+class AdminUserCreateIn(BaseModel):
+    email: EmailStr
+    full_name: str = PField(min_length=2, max_length=120)
+    password: str = PField(min_length=8, max_length=128)
+    role: Role = Role.FARMER
+    language: str = "en"
+    verification_status: str = PField(default="pending", pattern="^(pending|verified|rejected)$")
+
+
+class AdvisorIn(BaseModel):
+    question: str = PField(min_length=3, max_length=1000)
+    language: str = "en"
+    crop: str | None = None
+
+
+class GeoSearchIn(BaseModel):
+    text: str = PField(min_length=2, max_length=240)
+    limit: int = PField(default=5, ge=1, le=10)
+
+
+class RouteIn(BaseModel):
+    origin_lat: float = PField(ge=-90, le=90)
+    origin_lon: float = PField(ge=-180, le=180)
+    dest_lat: float = PField(ge=-90, le=90)
+    dest_lon: float = PField(ge=-180, le=180)
+    mode: str = "drive"
+
+
+class LocationPingIn(BaseModel):
+    latitude: float = PField(ge=-90, le=90)
+    longitude: float = PField(ge=-180, le=180)
+    farm_id: str | None = None
+    field_id: str | None = None
+    job_id: str | None = None
+    source: str = PField(default="person", pattern="^(person|drone)$")
+    accuracy_m: float | None = None
+    altitude_m: float | None = None
+    heading_deg: float | None = None
+    speed_ms: float | None = None
+    battery_pct: float | None = None
+
+
+class LiveSessionIn(BaseModel):
+    device: str = PField(default="phone", pattern="^(phone|drone)$")
+    farm_id: str | None = None
+    field_id: str | None = None
+    job_id: str | None = None
+    case_id: str | None = None
+    notes: str | None = None
+
+
+class LiveSessionUpdateIn(BaseModel):
+    latitude: float | None = None
+    longitude: float | None = None
+    # Number of new frames since the last update, and how many carried a geotag.
+    frames: int = PField(default=0, ge=0)
+    geotagged_frames: int = PField(default=0, ge=0)
+    status: str | None = PField(default=None, pattern="^(live|ended)$")
+
+
+class FrameAnalyzeIn(BaseModel):
+    # data:image/jpeg;base64,... captured from a phone camera or a drone feed.
+    image: str
+    crop: str = "crop"
+    observations: str = ""
+    language: str = "en"
+    latitude: float | None = None
+    longitude: float | None = None
+    device: str = PField(default="phone", pattern="^(phone|drone)$")
+    # Optionally attach the frame to a case as a media asset.
+    case_id: str | None = None
+    field_id: str | None = None
+    save_media: bool = True
+
+
+class TreatmentDraftIn(BaseModel):
+    problem: str = PField(min_length=2, max_length=300)
+    crop: str = "crop"
+    severity: str = "unknown"
+    language: str = "en"
+    case_id: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # Health / meta
 # --------------------------------------------------------------------------- #
@@ -267,6 +382,24 @@ def meta() -> dict:
         ],
         "transitions": {s.value: sorted(t.value for t in targets) for s, targets in TRANSITIONS.items()},
         "ai": ai_service.provider_status(),
+        "maps": {
+            "provider": settings.maps_provider,
+            "api_key": settings.geoapify_api_key,
+            "geocoding": bool(settings.geoapify_api_key),
+            "routing": bool(settings.geoapify_api_key),
+            "tile_url": (
+                "https://maps.geoapify.com/v1/tile/osm-bright/{z}/{x}/{y}.png?apiKey="
+                + settings.geoapify_api_key
+                if settings.geoapify_api_key
+                else "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+            ),
+            "attribution": (
+                'Powered by <a href="https://www.geoapify.com/" target="_blank" rel="noopener">Geoapify</a> '
+                '&middot; &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'
+                if settings.geoapify_api_key
+                else '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'
+            ),
+        },
         "modules": MODULES,
     }
 
@@ -278,6 +411,8 @@ MODULES = [
      "summary": "Guided photo, video and drone capture with quality validation."},
     {"key": "ai_analysis", "title": "AI Crop-Health Intelligence", "image": "module_ai_analysis",
      "summary": "Preliminary, uncertainty-aware findings with verified-source RAG."},
+    {"key": "advisor", "title": "AI Farm Advisor", "image": "module_advisor",
+     "summary": "Ask crop, pest and safety questions in any of 22 Indian languages."},
     {"key": "treatment", "title": "Treatment Planning", "image": "module_treatment",
      "summary": "Label-compliant plans with dosage, PPE and safety intervals."},
     {"key": "approval", "title": "Approval Workflow", "image": "module_approval",
@@ -362,6 +497,83 @@ def login(payload: LoginIn, db: Session = Depends(get_db)) -> dict:
 @app.get("/api/auth/me", tags=["Auth"])
 def me(user: User = Depends(current_user)) -> dict:
     return _user_out(user)
+
+
+@app.post("/api/auth/password-reset/request", tags=["Auth"])
+def password_reset_request(payload: PasswordResetRequestIn, db: Session = Depends(get_db)) -> dict:
+    """Begin the forgot-password flow.
+
+    Always returns the same message regardless of whether the address exists, so
+    the endpoint cannot be used to enumerate accounts. When the account does
+    exist, a single-use token is issued and delivery is attempted.
+    """
+    user = db.execute(select(User).where(User.email == payload.email)).scalars().first()
+    generic = {
+        "message": "If an account exists for that email, a reset link has been sent.",
+    }
+    if user is None or user.status != "active":
+        record_audit(db, actor=None, action="password_reset.requested", entity="user",
+                     detail={"email": payload.email, "found": False})
+        db.commit()
+        return generic
+
+    raw, _token = issue_reset_token(db, user, requested_by="self-service")
+    base = (settings.public_base_url or "").rstrip("/")
+    reset_url = f"{base}/#reset-password?token={raw}" if base else f"/#reset-password?token={raw}"
+    delivered = send_password_reset(
+        to=user.email, full_name=user.full_name, reset_url=reset_url,
+        ttl_minutes=RESET_TTL_MINUTES,
+    )
+    record_audit(db, actor=user, action="password_reset.requested", entity="user",
+                 entity_id=user.id, detail={"delivered": delivered})
+    db.commit()
+
+    # Outside production, surface the token so the flow is testable without a
+    # mail relay. Never in production, where that would hand out account access.
+    if not settings.is_production:
+        generic["dev_token"] = raw
+        generic["reset_url"] = reset_url
+    return generic
+
+
+@app.post("/api/auth/password-reset/confirm", tags=["Auth"])
+def password_reset_confirm(payload: PasswordResetConfirmIn, db: Session = Depends(get_db)) -> dict:
+    """Redeem a reset token, set the new password and evict old sessions."""
+    token = resolve_reset_token(db, payload.token)
+    if token is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This reset link is invalid or has expired. Request a new one.",
+        )
+    user = db.get(User, token.user_id)
+    if user is None or user.status != "active":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account is not active")
+
+    set_password(db, user, payload.new_password)
+    consume_reset_token(db, token)
+    record_audit(db, actor=user, action="password_reset.completed", entity="user",
+                 entity_id=user.id, detail={"sessions_invalidated": True})
+    db.commit()
+    return {"message": "Password updated. Sign in with your new password."}
+
+
+@app.post("/api/auth/password/change", tags=["Auth"])
+def password_change(
+    payload: PasswordChangeIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Change the password of the signed-in user, verifying the current one."""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must differ from the current one")
+    set_password(db, user, payload.new_password)
+    record_audit(db, actor=user, action="password.changed", entity="user", entity_id=user.id)
+    db.commit()
+    # The caller's own token is now stale; hand back a fresh one so the session
+    # that made the change is not signed out by its own success.
+    return {"message": "Password updated.", "token": create_token(user)}
 
 
 @app.patch("/api/auth/me", tags=["Auth"])
@@ -723,7 +935,7 @@ def get_case(case_id: str, user: User = Depends(current_user), db: Session = Dep
 @app.post("/api/cases", tags=["Cases"], status_code=201)
 def create_case(
     payload: CaseIn,
-    user: User = Depends(require_roles(Role.FARMER)),
+    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     if not db.get(Field, payload.field_id):
@@ -756,7 +968,7 @@ def _first_user_id(db: Session, role: Role) -> str | None:
 @app.post("/api/cases/{case_id}/capture", tags=["Cases"])
 def capture_imagery(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER)),
+    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -770,7 +982,7 @@ def capture_imagery(
 @app.post("/api/cases/{case_id}/analyze", tags=["Cases"])
 def run_analysis(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER, Role.AGRONOMIST)),
+    user: User = Depends(require_roles(Role.FARMER, Role.AGRONOMIST, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -816,7 +1028,7 @@ def run_analysis(
 @app.post("/api/cases/{case_id}/submit", tags=["Cases"])
 def submit_for_review(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER)),
+    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -834,7 +1046,7 @@ def submit_for_review(
 def agronomist_review(
     case_id: str,
     payload: ReviewIn,
-    user: User = Depends(require_roles(Role.AGRONOMIST)),
+    user: User = Depends(require_roles(Role.AGRONOMIST, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -852,7 +1064,10 @@ def agronomist_review(
         revision=revision,
     )
     db.add(review)
-    case.agronomist_id = user.id
+    # Only a real agronomist takes ownership of the case; an administrator
+    # acting on someone's behalf must not become the case's agronomist.
+    if user.role == Role.AGRONOMIST.value:
+        case.agronomist_id = user.id
     record_audit(db, actor=user, action="case.reviewed", entity="case", entity_id=case.id,
                  detail={"decision": payload.decision, "revision": revision})
     if payload.decision == "reject":
@@ -865,7 +1080,7 @@ def agronomist_review(
 def submit_plan(
     case_id: str,
     payload: PlanIn,
-    user: User = Depends(require_roles(Role.AGRONOMIST)),
+    user: User = Depends(require_roles(Role.AGRONOMIST, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -910,7 +1125,7 @@ def submit_plan(
 def submit_costing(
     case_id: str,
     payload: CostIn,
-    user: User = Depends(require_roles(Role.FARM_MANAGER)),
+    user: User = Depends(require_roles(Role.FARM_MANAGER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -965,7 +1180,7 @@ def submit_costing(
 def choose_implementation(
     case_id: str,
     payload: ChoiceIn,
-    user: User = Depends(require_roles(Role.FARMER)),
+    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1028,7 +1243,7 @@ def assign_job(
 @app.post("/api/jobs/{job_id}/preflight", tags=["Drone Operations"])
 def job_preflight(
     job_id: str,
-    user: User = Depends(require_roles(Role.DRONE_OPERATOR)),
+    user: User = Depends(require_roles(Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     job = db.get(Job, job_id)
@@ -1052,7 +1267,7 @@ def job_preflight(
 @app.post("/api/jobs/{job_id}/start", tags=["Drone Operations"])
 def job_start(
     job_id: str,
-    user: User = Depends(require_roles(Role.DRONE_OPERATOR)),
+    user: User = Depends(require_roles(Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     from datetime import datetime, timezone
@@ -1080,7 +1295,7 @@ def job_start(
 def job_complete(
     job_id: str,
     payload: JobUpdateIn,
-    user: User = Depends(require_roles(Role.DRONE_OPERATOR)),
+    user: User = Depends(require_roles(Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     from datetime import datetime, timezone
@@ -1118,7 +1333,7 @@ def job_complete(
 @app.post("/api/cases/{case_id}/follow-up", tags=["Cases"])
 def follow_up(
     case_id: str,
-    user: User = Depends(require_roles(Role.AGRONOMIST, Role.FARMER)),
+    user: User = Depends(require_roles(Role.AGRONOMIST, Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1182,7 +1397,7 @@ def list_drones(user: User = Depends(current_user), db: Session = Depends(get_db
 @app.post("/api/drones", tags=["Drone Operations"], status_code=201)
 def register_drone(
     payload: DroneIn,
-    user: User = Depends(require_roles(Role.DRONE_OPERATOR)),
+    user: User = Depends(require_roles(Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     d = DroneDevice(operator_id=user.id, simulated=True, verified=False, **payload.model_dump())
@@ -1224,14 +1439,14 @@ def list_invoices(user: User = Depends(current_user), db: Session = Depends(get_
 @app.post("/api/invoices/{invoice_id}/pay", tags=["Payments"])
 def pay_invoice(
     invoice_id: str,
-    user: User = Depends(require_roles(Role.FARMER)),
+    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     invoice = db.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(404, "Invoice not found")
     case = db.get(Case, invoice.case_id)
-    if case and case.farmer_id != user.id:
+    if case and case.farmer_id != user.id and user.role != Role.SUPER_ADMIN.value:
         raise HTTPException(403, "Not your invoice")
     idem = f"pay:{invoice_id}"
     cached = idempotent(db, idem, "invoice.pay")
@@ -1390,6 +1605,28 @@ def update_grievance(
     return _grievance_out(g)
 
 
+@app.post("/api/advisor", tags=["AI"])
+def advisor(
+    payload: AdvisorIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Ask the AI advisory assistant a question in the user's language.
+
+    Guidance is general and never a diagnosis or a spraying command; the reply is
+    labelled live or simulated by the service so the interface can be honest.
+    """
+    result = ai_service.advise(
+        question=payload.question,
+        language=payload.language or user.language or "en",
+        crop=payload.crop,
+    )
+    record_audit(db, actor=user, action="advisor.queried", entity="advisor",
+                 detail={"mode": result.get("mode"), "language": result.get("language")})
+    db.commit()
+    return result
+
+
 @app.get("/api/knowledge", tags=["Knowledge"])
 def list_knowledge(db: Session = Depends(get_db)) -> list[dict]:
     items = db.execute(select(KnowledgeSource)).scalars().all()
@@ -1413,6 +1650,531 @@ def list_products(db: Session = Depends(get_db)) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Geo: geocoding, routing and geotagging
+# --------------------------------------------------------------------------- #
+def _visible_farm_ids(db: Session, user: User) -> list[str]:
+    return [f.id for f in _visible_farms(db, user)]
+
+
+def _guard_farm_access(db: Session, user: User, farm_id: str | None) -> Farm | None:
+    """Return the farm if the user may see it, else raise 403/404."""
+    if not farm_id:
+        return None
+    farm = db.get(Farm, farm_id)
+    if not farm:
+        raise HTTPException(404, "Farm not found")
+    if user.role == Role.SUPER_ADMIN.value:
+        return farm
+    if farm.id not in _visible_farm_ids(db, user):
+        raise HTTPException(403, "You do not have access to this farm")
+    return farm
+
+
+@app.post("/api/geo/search", tags=["Geo"])
+def geo_search(payload: GeoSearchIn, user: User = Depends(current_user)) -> dict:
+    """Forward-geocode a village, address or landmark (Geoapify)."""
+    if not settings.geoapify_api_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Geocoding is not configured. Set GEOAPIFY_API_KEY on the server.",
+        )
+    try:
+        results = geo.geocode_address(payload.text, limit=payload.limit)
+    except geo.GeoProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"query": payload.text, "results": results}
+
+
+@app.get("/api/geo/reverse", tags=["Geo"])
+def geo_reverse(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    user: User = Depends(current_user),
+) -> dict:
+    """Resolve coordinates to village / district / state for farm registration."""
+    if not settings.geoapify_api_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Reverse geocoding is not configured. Set GEOAPIFY_API_KEY on the server.",
+        )
+    try:
+        return geo.reverse_geocode(lat, lon)
+    except geo.GeoProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@app.post("/api/geo/route", tags=["Geo"])
+def geo_route(payload: RouteIn, user: User = Depends(current_user)) -> dict:
+    """Turn-by-turn route between two points, for reaching a booked farm."""
+    if not settings.geoapify_api_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Routing is not configured. Set GEOAPIFY_API_KEY on the server.",
+        )
+    try:
+        return geo.route(
+            (payload.origin_lat, payload.origin_lon),
+            (payload.dest_lat, payload.dest_lon),
+            mode=payload.mode,
+        )
+    except geo.GeoProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@app.get("/api/geo/directions/{farm_id}", tags=["Geo"])
+def geo_directions(
+    farm_id: str,
+    from_lat: float | None = Query(None, ge=-90, le=90),
+    from_lon: float | None = Query(None, ge=-180, le=180),
+    mode: str = "drive",
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Directions to a farm, from the caller's position (or its field centroid).
+
+    Every role that can see a farm — its farmer, the farm manager, the
+    agronomist and the drone operator — can obtain directions to it. The
+    destination falls back to the centroid of the farm's fields when the farm
+    itself has no coordinates, so a geotagged field is still reachable.
+    """
+    farm = db.get(Farm, farm_id)
+    if not farm:
+        raise HTTPException(404, "Farm not found")
+    if user.role != Role.SUPER_ADMIN.value and farm.id not in _visible_farm_ids(db, user):
+        raise HTTPException(403, "You do not have access to this farm")
+
+    dest = None
+    if farm.latitude is not None and farm.longitude is not None:
+        dest = (farm.latitude, farm.longitude)
+    else:
+        fields = db.execute(select(Field).where(Field.farm_id == farm.id)).scalars().all()
+        for f in fields:
+            ring = ((f.boundary or {}).get("coordinates") or [[]])[0]
+            if ring:
+                dest = (sum(p[1] for p in ring) / len(ring), sum(p[0] for p in ring) / len(ring))
+                break
+    if dest is None:
+        raise HTTPException(409, "This farm has no coordinates. Geotag the farm or one of its fields first.")
+
+    origin = None
+    if from_lat is not None and from_lon is not None:
+        origin = (from_lat, from_lon)
+    else:
+        # Fall back to the caller's most recent known position.
+        ping = db.execute(
+            select(LocationPing).where(LocationPing.actor_id == user.id)
+            .order_by(LocationPing.recorded_at.desc())
+        ).scalars().first()
+        if ping:
+            origin = (ping.latitude, ping.longitude)
+
+    if origin is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Your location is unknown. Share your location or pass from_lat/from_lon.",
+        )
+
+    result = {
+        "farm": {"id": farm.id, "name": farm.name, "village": farm.village,
+                 "district": farm.district, "state": farm.state},
+        "destination": {"latitude": dest[0], "longitude": dest[1]},
+        "origin": {"latitude": origin[0], "longitude": origin[1]},
+        "straight_line_km": geo.haversine_km(origin, dest),
+    }
+    if settings.geoapify_api_key:
+        try:
+            result["route"] = geo.route(origin, dest, mode=mode)
+        except geo.GeoProviderError as exc:
+            result["route_error"] = str(exc)
+    else:
+        result["route_error"] = "Routing is not configured; showing the straight-line direction."
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Live location tracking
+# --------------------------------------------------------------------------- #
+def _ping_out(p: LocationPing) -> dict:
+    return {
+        "id": p.id, "actor_id": p.actor_id, "source": p.source,
+        "latitude": p.latitude, "longitude": p.longitude,
+        "accuracy_m": p.accuracy_m, "altitude_m": p.altitude_m,
+        "heading_deg": p.heading_deg, "speed_ms": p.speed_ms, "battery_pct": p.battery_pct,
+        "farm_id": p.farm_id, "field_id": p.field_id, "job_id": p.job_id,
+        "recorded_at": p.recorded_at.isoformat() if p.recorded_at else None,
+    }
+
+
+@app.post("/api/tracking/ping", tags=["Tracking"], status_code=201)
+def tracking_ping(
+    payload: LocationPingIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Record the caller's current position (phone or drone).
+
+    A drone operator may report a drone's position by setting ``source='drone'``;
+    the ping is still attributed to the signed-in operator.
+    """
+    if payload.farm_id:
+        _guard_farm_access(db, user, payload.farm_id)
+    ping = LocationPing(actor_id=user.id, **payload.model_dump())
+    db.add(ping)
+    db.flush()
+    db.commit()
+    return _ping_out(ping)
+
+
+@app.get("/api/tracking/live", tags=["Tracking"])
+def tracking_live(
+    farm_id: str | None = None,
+    job_id: str | None = None,
+    max_age_min: int = Query(120, ge=1, le=1440),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Latest known position of every tracked actor, plus their recent track.
+
+    Scoped to what the caller may see: a farmer sees actors on their own farms,
+    a manager on managed farms, and an operator/agronomist/admin sees the fleet.
+    """
+    cutoff = dt.datetime.utcnow() - dt.timedelta(minutes=max_age_min)
+    stmt = select(LocationPing).where(LocationPing.recorded_at >= cutoff)
+    if farm_id:
+        _guard_farm_access(db, user, farm_id)
+        stmt = stmt.where(LocationPing.farm_id == farm_id)
+    elif job_id:
+        stmt = stmt.where(LocationPing.job_id == job_id)
+    else:
+        visible = _visible_farm_ids(db, user)
+        if user.role not in (Role.SUPER_ADMIN.value, Role.AGRONOMIST.value, Role.DRONE_OPERATOR.value):
+            stmt = stmt.where(
+                (LocationPing.farm_id.in_(visible)) | (LocationPing.actor_id == user.id)
+            )
+    pings = db.execute(stmt.order_by(LocationPing.recorded_at.asc())).scalars().all()
+
+    by_actor: dict[str, list[LocationPing]] = {}
+    for p in pings:
+        by_actor.setdefault(p.actor_id, []).append(p)
+
+    actors = []
+    for actor_id, items in by_actor.items():
+        last = items[-1]
+        actor = db.get(User, actor_id)
+        actors.append({
+            "actor_id": actor_id,
+            "name": actor.full_name if actor else "Unknown",
+            "role": actor.role if actor else None,
+            "avatar_image": actor.avatar_image if actor else None,
+            "source": last.source,
+            "latest": _ping_out(last),
+            "track": [[p.longitude, p.latitude] for p in items][-200:],
+        })
+    actors.sort(key=lambda a: a["latest"]["recorded_at"] or "", reverse=True)
+    return {"count": len(actors), "actors": actors, "max_age_min": max_age_min}
+
+
+@app.get("/api/tracking/actor/{actor_id}", tags=["Tracking"])
+def tracking_actor(
+    actor_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """The track of one actor, most recent last."""
+    actor = db.get(User, actor_id)
+    if not actor:
+        raise HTTPException(404, "Actor not found")
+    if actor_id != user.id and user.role not in (
+        Role.SUPER_ADMIN.value, Role.AGRONOMIST.value, Role.FARM_MANAGER.value, Role.DRONE_OPERATOR.value
+    ):
+        raise HTTPException(403, "You may only view your own track")
+    pings = db.execute(
+        select(LocationPing).where(LocationPing.actor_id == actor_id)
+        .order_by(LocationPing.recorded_at.desc()).limit(limit)
+    ).scalars().all()
+    pings.reverse()
+    return {
+        "actor": {"id": actor.id, "name": actor.full_name, "role": actor.role,
+                  "avatar_image": actor.avatar_image},
+        "points": [_ping_out(p) for p in pings],
+        "track": [[p.longitude, p.latitude] for p in pings],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Live capture sessions (mobile and drone video)
+# --------------------------------------------------------------------------- #
+def _live_out(s: LiveSession) -> dict:
+    return {
+        "id": s.id, "owner_id": s.owner_id, "device": s.device, "status": s.status,
+        "farm_id": s.farm_id, "field_id": s.field_id, "job_id": s.job_id, "case_id": s.case_id,
+        "latitude": s.latitude, "longitude": s.longitude,
+        "frames": s.frames, "geotagged_frames": s.geotagged_frames,
+        "started_at": s.started_at.isoformat() if s.started_at else None,
+        "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+        "notes": s.notes,
+    }
+
+
+@app.post("/api/live-sessions", tags=["Live capture"], status_code=201)
+def start_live_session(
+    payload: LiveSessionIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Begin a live video capture session from a phone or drone."""
+    if payload.farm_id:
+        _guard_farm_access(db, user, payload.farm_id)
+    session = LiveSession(owner_id=user.id, **payload.model_dump())
+    db.add(session)
+    db.flush()
+    record_audit(db, actor=user, action="live_session.started", entity="live_session",
+                 entity_id=session.id, detail={"device": session.device})
+    db.commit()
+    return _live_out(session)
+
+
+@app.patch("/api/live-sessions/{session_id}", tags=["Live capture"])
+def update_live_session(
+    session_id: str,
+    payload: LiveSessionUpdateIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Report progress and the latest geotag of a live capture session."""
+    session = db.get(LiveSession, session_id)
+    if not session:
+        raise HTTPException(404, "Live session not found")
+    if session.owner_id != user.id and user.role != Role.SUPER_ADMIN.value:
+        raise HTTPException(403, "Not your capture session")
+    if payload.latitude is not None:
+        session.latitude = payload.latitude
+    if payload.longitude is not None:
+        session.longitude = payload.longitude
+    session.frames += payload.frames
+    session.geotagged_frames += payload.geotagged_frames
+    if payload.status:
+        session.status = payload.status
+        if payload.status == "ended":
+            session.ended_at = dt.datetime.utcnow()
+    db.flush()
+    db.commit()
+    return _live_out(session)
+
+
+@app.get("/api/live-sessions", tags=["Live capture"])
+def list_live_sessions(
+    status: str | None = Query(None, pattern="^(live|ended)$"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Live capture sessions, newest first, scoped to the caller's visibility."""
+    stmt = select(LiveSession)
+    if status:
+        stmt = stmt.where(LiveSession.status == status)
+    if user.role not in (Role.SUPER_ADMIN.value, Role.AGRONOMIST.value, Role.DRONE_OPERATOR.value):
+        visible = _visible_farm_ids(db, user)
+        stmt = stmt.where((LiveSession.owner_id == user.id) | (LiveSession.farm_id.in_(visible)))
+    sessions = db.execute(stmt.order_by(LiveSession.started_at.desc()).limit(100)).scalars().all()
+    return [_live_out(s) for s in sessions]
+
+
+@app.post("/api/live-sessions/{session_id}/end", tags=["Live capture"])
+def end_live_session(
+    session_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.get(LiveSession, session_id)
+    if not session:
+        raise HTTPException(404, "Live session not found")
+    if session.owner_id != user.id and user.role != Role.SUPER_ADMIN.value:
+        raise HTTPException(403, "Not your capture session")
+    session.status = "ended"
+    session.ended_at = dt.datetime.utcnow()
+    record_audit(db, actor=user, action="live_session.ended", entity="live_session",
+                 entity_id=session.id, detail={"frames": session.frames})
+    db.commit()
+    return _live_out(session)
+
+
+# --------------------------------------------------------------------------- #
+# Weather intelligence
+# --------------------------------------------------------------------------- #
+def _weather_spot(db: Session, user: User, farm_id: str | None, field_id: str | None,
+                  lat: float | None, lon: float | None) -> tuple[float | None, float | None, dict]:
+    """Resolve the coordinates to forecast for, and describe the location."""
+    if lat is not None and lon is not None:
+        return lat, lon, {"kind": "point", "latitude": lat, "longitude": lon}
+    if field_id:
+        field = db.get(Field, field_id)
+        if not field:
+            raise HTTPException(404, "Field not found")
+        _guard_farm_access(db, user, field.farm_id)
+        ring = ((field.boundary or {}).get("coordinates") or [[]])[0]
+        if ring:
+            clat = sum(p[1] for p in ring) / len(ring)
+            clon = sum(p[0] for p in ring) / len(ring)
+            return clat, clon, {"kind": "field", "id": field.id, "name": field.name,
+                                "latitude": clat, "longitude": clon}
+        raise HTTPException(409, "This field has no boundary to locate weather for.")
+    if farm_id:
+        farm = _guard_farm_access(db, user, farm_id)
+        if farm and farm.latitude is not None and farm.longitude is not None:
+            return farm.latitude, farm.longitude, {"kind": "farm", "id": farm.id, "name": farm.name,
+                                                   "latitude": farm.latitude, "longitude": farm.longitude}
+        if farm:
+            fields = db.execute(select(Field).where(Field.farm_id == farm.id)).scalars().all()
+            for f in fields:
+                ring = ((f.boundary or {}).get("coordinates") or [[]])[0]
+                if ring:
+                    clat = sum(p[1] for p in ring) / len(ring)
+                    clon = sum(p[0] for p in ring) / len(ring)
+                    return clat, clon, {"kind": "farm", "id": farm.id, "name": farm.name,
+                                        "latitude": clat, "longitude": clon}
+        raise HTTPException(409, "This farm has no coordinates yet.")
+    raise HTTPException(422, "Provide latitude/longitude, a farm_id or a field_id.")
+
+
+@app.get("/api/weather", tags=["Weather"])
+def get_weather(
+    farm_id: str | None = None,
+    field_id: str | None = None,
+    lat: float | None = Query(None, ge=-90, le=90),
+    lon: float | None = Query(None, ge=-180, le=180),
+    days: int = Query(7, ge=1, le=14),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Forecast plus spray-window and disease-pressure guidance for a location."""
+    clat, clon, where = _weather_spot(db, user, farm_id, field_id, lat, lon)
+    try:
+        data = weather_service.fetch(clat, clon, days=days)
+    except weather_service.WeatherProviderError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    data["location"] = where
+    return data
+
+
+# --------------------------------------------------------------------------- #
+# Real-time AI vision analysis (phone camera and drone frames)
+# --------------------------------------------------------------------------- #
+@app.post("/api/ai/analyze-frame", tags=["AI"])
+def analyze_frame_endpoint(
+    payload: FrameAnalyzeIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Analyse a single captured frame and optionally file it against a case.
+
+    This is the real-time path: the frontend grabs a frame from the phone
+    camera or a drone feed, downsizes it, and posts it here for a preliminary
+    assessment in the farmer's language.
+    """
+    field = None
+    if payload.field_id:
+        field = db.get(Field, payload.field_id)
+        if not field:
+            raise HTTPException(404, "Field not found")
+        _guard_farm_access(db, user, field.farm_id)
+    if payload.case_id:
+        case = db.get(Case, payload.case_id)
+        if not case:
+            raise HTTPException(404, "Case not found")
+        if user.role == Role.FARMER.value and case.farmer_id != user.id:
+            raise HTTPException(403, "Not your case")
+        if not field:
+            field = db.get(Field, case.field_id)
+
+    crop = payload.crop or (field.crop if field else "crop")
+    try:
+        result = ai_service.analyze_frame(
+            data_url=payload.image,
+            crop=crop,
+            observations=payload.observations,
+            language=payload.language,
+        )
+    except ai_service.VisionInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    media_id = None
+    if payload.save_media and field:
+        media = MediaAsset(
+            field_id=field.id,
+            uploaded_by=user.id,
+            kind="photo",
+            filename=f"{payload.device}-frame-{dt.datetime.utcnow().strftime('%H%M%S')}.jpg",
+            image_key="module_crop_health",
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            captured_at=dt.datetime.utcnow().isoformat(),
+            quality_score=0.82,
+            quality_notes="Captured live; assessed by the AI vision pipeline",
+            source="drone" if payload.device == "drone" else "device",
+        )
+        db.add(media)
+        db.flush()
+        media_id = media.id
+        record_audit(db, actor=user, action="media.live_frame", entity="media", entity_id=media.id,
+                     detail={"device": payload.device, "case_id": payload.case_id})
+
+    if payload.case_id:
+        notify(db, user_id=user.id, title="Frame analysed",
+               body=f"A live frame was assessed: {(result['findings'][0]['label'] if result.get('findings') else 'no finding')}.",
+               category="ai")
+
+    db.commit()
+    return {"analysis": result, "media_id": media_id, "crop": crop, "device": payload.device}
+
+
+# --------------------------------------------------------------------------- #
+# AI treatment drafting
+# --------------------------------------------------------------------------- #
+@app.post("/api/ai/treatment-draft", tags=["AI"])
+def treatment_draft(
+    payload: TreatmentDraftIn,
+    user: User = Depends(require_roles(Role.AGRONOMIST, Role.FARM_MANAGER, Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Draft a treatment plan from a confirmed problem, weather-aware.
+
+    The draft is advisory input for the agronomist, never an auto-approved plan:
+    it is returned for review and must still pass through the costing workflow.
+    """
+    weather_note = None
+    if payload.case_id:
+        case = db.get(Case, payload.case_id)
+        if not case:
+            raise HTTPException(404, "Case not found")
+        field = db.get(Field, case.field_id)
+        farm = db.get(Farm, field.farm_id) if field else None
+        lat = farm.latitude if farm else None
+        lon = farm.longitude if farm else None
+        if lat is None and field:
+            ring = ((field.boundary or {}).get("coordinates") or [[]])[0]
+            if ring:
+                lat = sum(p[1] for p in ring) / len(ring)
+                lon = sum(p[0] for p in ring) / len(ring)
+        if lat is not None and lon is not None:
+            try:
+                wx = weather_service.fetch(lat, lon, days=3)
+                weather_note = "; ".join(wx["guidance"]["treatment"]) or None
+            except weather_service.WeatherProviderError:
+                weather_note = None
+
+    draft = ai_service.draft_treatment(
+        crop=payload.crop,
+        problem=payload.problem,
+        severity=payload.severity,
+        weather_note=weather_note,
+        language=payload.language,
+    )
+    draft["weather_context"] = weather_note
+    return draft
+
+
+# --------------------------------------------------------------------------- #
 # Admin
 # --------------------------------------------------------------------------- #
 @app.get("/api/admin/users", tags=["Administration"])
@@ -1421,6 +2183,96 @@ def admin_users(
 ) -> list[dict]:
     users = db.execute(select(User)).scalars().all()
     return [_user_out(u) | {"status": u.status} for u in users]
+
+
+@app.post("/api/admin/users", tags=["Administration"], status_code=201)
+def admin_create_user(
+    payload: AdminUserCreateIn,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create an account with any role, including privileged ones.
+
+    Self-registration deliberately cannot mint administrators, so this is the
+    in-app path for provisioning them. The action is audited.
+    """
+    if db.execute(select(User).where(User.email == payload.email)).scalars().first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+    created = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        password_hash=hash_password(payload.password),
+        role=payload.role.value,
+        language=payload.language,
+        avatar_image=f"role_{payload.role.value}",
+        verification_status=payload.verification_status,
+    )
+    db.add(created)
+    db.flush()
+    record_audit(db, actor=user, action="user.created_by_admin", entity="user",
+                 entity_id=created.id, detail={"role": payload.role.value})
+    db.commit()
+    return _user_out(created)
+
+
+@app.patch("/api/admin/users/{user_id}/role", tags=["Administration"])
+def set_user_role(
+    user_id: str,
+    payload: RoleUpdateIn,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Grant or revoke a role. Super-admin-only, and audited.
+
+    Guard rails keep the platform from being locked out: an administrator cannot
+    demote themselves, and the last remaining super admin cannot be demoted.
+    """
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.id == user.id and payload.role != Role.SUPER_ADMIN:
+        raise HTTPException(409, "You cannot remove your own administrator role")
+    if target.role == Role.SUPER_ADMIN.value and payload.role != Role.SUPER_ADMIN:
+        remaining = db.execute(
+            select(func.count(User.id)).where(
+                User.role == Role.SUPER_ADMIN.value, User.id != target.id
+            )
+        ).scalar_one()
+        if remaining == 0:
+            raise HTTPException(409, "At least one super administrator must remain")
+
+    previous = target.role
+    if previous == payload.role.value:
+        return _user_out(target)
+
+    target.role = payload.role.value
+    target.avatar_image = f"role_{payload.role.value}"
+    # A role change alters what the session may do; revoke existing sessions so
+    # the new permissions take effect on the next sign-in rather than lingering.
+    target.session_epoch = (target.session_epoch or 0) + 1
+    record_audit(db, actor=user, action="user.role_changed", entity="user", entity_id=target.id,
+                 detail={"from": previous, "to": payload.role.value, "reason": payload.reason})
+    notify(db, user_id=target.id, title="Your role was updated",
+           body=f"Your account role is now '{ROLE_LABELS.get(payload.role, payload.role.value)}'.",
+           category="account")
+    db.commit()
+    return _user_out(target)
+
+
+@app.post("/api/admin/users/{user_id}/revoke-sessions", tags=["Administration"])
+def revoke_sessions(
+    user_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Invalidate every active session for an account (forced sign-out)."""
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    target.session_epoch = (target.session_epoch or 0) + 1
+    record_audit(db, actor=user, action="user.sessions_revoked", entity="user", entity_id=target.id)
+    db.commit()
+    return {"user_id": target.id, "sessions_revoked": True}
 
 
 @app.post("/api/admin/users/{user_id}/verify", tags=["Administration"])
@@ -1564,6 +2416,23 @@ def case_report(case_id: str, user: User = Depends(current_user), db: Session = 
         ),
         "sources": data["analyses"][0]["sources"] if data["analyses"] else [],
     }
+
+
+@app.get("/api/cases/{case_id}/report/pdf", tags=["Reports"])
+def case_report_pdf(case_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Download the case report as a PDF (same data as the JSON report)."""
+    report = case_report(case_id, user=user, db=db)
+    try:
+        pdf = build_case_pdf(report)
+    except Exception as exc:  # rendering failure must not 500 without context
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            f"Could not render the report: {exc}") from exc
+    filename = f"{report['report_id']}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # --------------------------------------------------------------------------- #

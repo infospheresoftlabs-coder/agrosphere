@@ -158,6 +158,12 @@ IMAGES: dict[str, tuple[str, int, int]] = {
         1200,
         800,
     ),
+    "module_advisor": (
+        "Indian farmer holding a smartphone that shows a friendly glowing chat bubble over a "
+        "healthy crop field, conversational AI assistant, warm golden-hour light, editorial",
+        1200,
+        800,
+    ),
     "module_knowledge": (
         "open agricultural knowledge base with books, plant specimens and a magnifier over "
         "verified sources, scholarly warm light",
@@ -187,6 +193,17 @@ IMAGES: dict[str, tuple[str, int, int]] = {
         "clean, high key",
         1200,
         800,
+    ),
+    # Sign-in backdrop: a drone over a Punjab farm, deliberately shallow depth of
+    # field so the form stays readable over it.
+    "signin_hero": (
+        "a sleek white agricultural quadcopter drone hovering low over a vast golden "
+        "Punjab wheat field in India, endless ripe crop rows stretching to the horizon, "
+        "a tractor trail cutting through, soft blurred background with strong bokeh, "
+        "warm golden-hour sunlight and long shadows, drone in sharp focus, "
+        "cinematic vertical composition with open sky space at the top for text",
+        1400,
+        1800,
     ),
 }
 

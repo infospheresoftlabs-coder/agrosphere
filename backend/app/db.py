@@ -26,6 +26,10 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    # create_all adds missing tables but not missing columns on existing ones.
+    from .migrations import run_migrations
+
+    run_migrations(engine)
 
 
 def get_db() -> Iterator[Session]:

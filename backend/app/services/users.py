@@ -9,7 +9,8 @@ be reassigned or de-identified so the record survives.
 
 Owned rows (deleted):
     farms, fields, cases and their analyses/reviews/plans/costs/jobs/invoices,
-    transactions, media assets, notifications, grievances, drone devices.
+    transactions, media assets, notifications, grievances, drone devices,
+    location pings, live capture sessions.
 
 Mentioned rows (reassigned to the acting administrator, or de-identified):
     case.agronomist_id / manager_id, farm.manager_id, plan.agronomist_id,
@@ -38,8 +39,11 @@ from ..models import (
     Grievance,
     Invoice,
     Job,
+    LiveSession,
+    LocationPing,
     MediaAsset,
     Notification,
+    PasswordResetToken,
     Review,
     Transaction,
     TreatmentPlan,
@@ -172,6 +176,9 @@ def plan_deletion(db: Session, user: User) -> DeletionPlan:
         ("notifications", Notification, Notification.user_id),
         ("grievances", Grievance, Grievance.user_id),
         ("drone_devices", DroneDevice, DroneDevice.operator_id),
+        ("password_reset_tokens", PasswordResetToken, PasswordResetToken.user_id),
+        ("location_pings", LocationPing, LocationPing.actor_id),
+        ("live_sessions", LiveSession, LiveSession.owner_id),
     ):
         ids = _ids(db, model, column, user.id)
         if ids:
@@ -238,6 +245,9 @@ def delete_user(db: Session, user: User, *, actor: User | None = None) -> Deleti
         ("notifications", Notification),
         ("grievances", Grievance),
         ("drone_devices", DroneDevice),
+        ("password_reset_tokens", PasswordResetToken),
+        ("location_pings", LocationPing),
+        ("live_sessions", LiveSession),
     ]
     for name, model in order:
         ids = plan.owned.get(name)

@@ -4,6 +4,19 @@ import {
   el, esc, inr, pct, fmtDate, titleCase, STATE_TONE, SEV_TONE, chip,
   statCard, moduleHero, emptyState, modal, field, input, select, bar, bindForm,
 } from './core.js';
+import {
+  hasLeaflet, createMap, addTiles, fitCoords, drawFarm, drawRoute, drawTrack,
+  farmIcon, actorIcon, dotIcon, locationPicker, currentPosition, watchPosition,
+  searchPlaces, reverseGeocode, routeTo, geoEnabled, fieldPolygon,
+} from './maps.js';
+import {
+  hasCamera, startCamera, stopStream, grabFrame, startRecording,
+  createSimulatedDroneFeed, toThumb,
+} from './capture.js';
+import { ctx } from './context.js';
+import { viewMap, directionsModal, geotagFarmModal } from './view_map.js';
+import { viewCapture } from './view_capture.js';
+import { viewWeather } from './view_weather.js';
 
 const app = document.getElementById('root');
 let META = null;
@@ -15,6 +28,9 @@ const ROUTES = {
   modules: { label: 'modules', icon: '▦', roles: null, render: viewModules },
   farms: { label: 'farms', icon: '⬡', roles: ['farmer', 'farm_manager', 'agronomist', 'super_admin'] , render: viewFarms },
   cases: { label: 'cases', icon: '❧', roles: null, render: viewCases },
+  map: { label: 'map', icon: '🗺', roles: null, render: viewMap },
+  capture: { label: 'capture', icon: '📷', roles: ['farmer', 'agronomist', 'drone_operator', 'farm_manager', 'super_admin'], render: viewCapture },
+  weather: { label: 'weather', icon: '⛅', roles: null, render: viewWeather },
   drone: { label: 'drone', icon: '✈', roles: ['drone_operator', 'farm_manager', 'super_admin'], render: viewDroneOps },
   fleet: { label: 'fleet', icon: '⛭', roles: ['drone_operator', 'super_admin'], render: viewFleet },
   reports: { label: 'reports', icon: '▤', roles: null, render: viewReports },
@@ -22,6 +38,7 @@ const ROUTES = {
   notifications: { label: 'notifications', icon: '🔔', roles: null, render: viewNotifications },
   grievances: { label: 'grievances', icon: '☎', roles: null, render: viewGrievances },
   knowledge: { label: 'knowledge', icon: '📚', roles: null, render: viewKnowledge },
+  advisor: { label: 'advisor', icon: '✦', roles: null, render: viewAdvisor },
   analytics: { label: 'analytics', icon: '📈', roles: null, render: viewAnalytics },
   admin: { label: 'admin', icon: '⚙', roles: ['super_admin'], render: viewAdmin },
   audit: { label: 'audit', icon: '🔒', roles: ['super_admin'], render: viewAudit },
@@ -30,6 +47,19 @@ const ROUTES = {
 
 let route = location.hash.replace('#', '') || 'dashboard';
 
+// A password-reset link arrives as "#reset-password?token=...". Read the token
+// once and strip it from the address bar so it is not left in history.
+let RESET_TOKEN = null;
+(function readResetToken() {
+  const hash = location.hash.replace(/^#/, '');
+  if (hash.startsWith('reset-password')) {
+    const qs = hash.split('?')[1] || '';
+    RESET_TOKEN = new URLSearchParams(qs).get('token') || null;
+    history.replaceState(null, '', location.pathname);
+    route = 'dashboard';
+  }
+})();
+
 function navigate(r) {
   route = r;
   location.hash = r;
@@ -37,7 +67,17 @@ function navigate(r) {
   document.querySelector('.sidebar')?.classList.remove('open');
 }
 
-window.addEventListener('hashchange', () => { route = location.hash.replace('#', '') || 'dashboard'; render(); });
+window.addEventListener('hashchange', () => {
+  const hash = location.hash.replace(/^#/, '');
+  if (hash.startsWith('reset-password')) {
+    RESET_TOKEN = new URLSearchParams(hash.split('?')[1] || '').get('token') || null;
+    history.replaceState(null, '', location.pathname);
+    render();
+    return;
+  }
+  route = hash || 'dashboard';
+  render();
+});
 
 /* --------------------------------------------------------------- bootstrap */
 async function boot() {
@@ -48,6 +88,7 @@ async function boot() {
   if (API.token) {
     try { ME = await api('/auth/me'); } catch { setSession(null, null); ME = null; }
   }
+  ctx.setSession(ME, META);
   render();
 }
 
@@ -76,12 +117,14 @@ function viewAuth() {
   );
 
   const card = el('div', { class: 'auth-card' });
-  let mode = 'login';
+  let mode = RESET_TOKEN ? 'reset' : 'login';
 
   const email = input('email', { type: 'email', placeholder: 'you@example.com', autocomplete: 'username' });
   const password = input('password', { type: 'password', placeholder: '••••••••', autocomplete: 'current-password' });
   const fullname = input('full_name', { placeholder: 'Your full name' });
-  const roleSel = select('role', (META?.signup_roles || META?.roles || []).map(r => ({ value: r.key, label: r.label })));
+  const newPassword = input('new_password', { type: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' });
+  const confirmPassword = input('confirm_password', { type: 'password', placeholder: 'Repeat new password', autocomplete: 'new-password' });
+  const roleSel = select('role', (META?.signup_roles || []).map(r => ({ value: r.key, label: r.label })));
   const langSel = select('language', (META?.languages || []).map(l => ({ value: l.code, label: `${l.native} — ${l.name}` })));
 
   function drawCard() {
@@ -90,69 +133,130 @@ function viewAuth() {
       el('button', { class: mode === 'login' ? 'active' : '', onclick: () => { mode = 'login'; drawCard(); } }, 'Sign in'),
       el('button', { class: mode === 'register' ? 'active' : '', onclick: () => { mode = 'register'; drawCard(); } }, 'Create account'),
     );
+    const heading = {
+      login: ['Sign in to AgroSphere', 'Enter your credentials to continue.'],
+      register: ['Join AgroSphere', 'Create your account to begin.'],
+      forgot: ['Reset your password', 'Enter your account email and we will send a reset link.'],
+      reset: ['Choose a new password', 'Set a new password for your account.'],
+    }[mode];
+    card.appendChild(el('div', {}, el('h2', {}, heading[0]),
+      el('p', { style: 'color:var(--text-2);margin:6px 0 20px;font-size:.9rem' }, heading[1])));
+    if (mode === 'login' || mode === 'register') card.appendChild(tabs);
+
     const form = el('form');
-    form.appendChild(field('Email', email));
-    form.appendChild(field('Password', password));
-    if (mode === 'register') {
+    if (mode === 'login') {
+      form.appendChild(field('Email', email));
+      form.appendChild(field('Password', password));
+    } else if (mode === 'register') {
+      form.appendChild(field('Email', email));
+      form.appendChild(field('Password', password));
       form.appendChild(field('Full name', fullname));
       form.appendChild(field('Role', roleSel, 'Role permissions are enforced on the server.'));
       form.appendChild(field('Preferred language', langSel));
+    } else if (mode === 'forgot') {
+      form.appendChild(field('Email', email));
+    } else {
+      form.appendChild(field('New password', newPassword));
+      form.appendChild(field('Confirm new password', confirmPassword));
     }
-    const btn = el('button', { class: 'btn block', type: 'submit' }, mode === 'login' ? 'Sign in' : 'Create account');
+
+    const btnLabel = { login: 'Sign in', register: 'Create account', forgot: 'Send reset link', reset: 'Update password' }[mode];
+    const btn = el('button', { class: 'btn block', type: 'submit' }, btnLabel);
     form.appendChild(btn);
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (mode === 'reset' && newPassword.value !== confirmPassword.value) {
+        return toast('The two passwords do not match', 'error');
+      }
       btn.disabled = true; btn.textContent = 'Please wait…';
       try {
-        const body = mode === 'login'
-          ? { email: email.value, password: password.value }
-          : { email: email.value, password: password.value, full_name: fullname.value, role: roleSel.value, language: langSel.value };
-        const res = await api(mode === 'login' ? '/auth/login' : '/auth/register', { method: 'POST', body });
-        setSession(res.token, res.user);
-        ME = res.user;
-        if (res.user.language) { setLang(res.user.language); }
-        toast(`Welcome, ${res.user.full_name}`);
-        render();
+        if (mode === 'login') {
+          const res = await api('/auth/login', { method: 'POST', body: { email: email.value, password: password.value } });
+          setSession(res.token, res.user); ME = res.user; ctx.setSession(ME, META);
+          if (res.user.language) setLang(res.user.language);
+          toast(`Welcome, ${res.user.full_name}`);
+          render();
+        } else if (mode === 'register') {
+          const res = await api('/auth/register', { method: 'POST', body: {
+            email: email.value, password: password.value, full_name: fullname.value,
+            role: roleSel.value, language: langSel.value } });
+          setSession(res.token, res.user); ME = res.user; ctx.setSession(ME, META);
+          if (res.user.language) setLang(res.user.language);
+          toast(`Welcome, ${res.user.full_name}`);
+          render();
+        } else if (mode === 'forgot') {
+          const res = await api('/auth/password-reset/request', { method: 'POST', body: { email: email.value } });
+          toast(res.message);
+          // Outside production the API returns the token so the flow can be
+          // exercised without a mail relay; move straight to the reset step.
+          if (res.dev_token) { RESET_TOKEN = res.dev_token; mode = 'reset'; drawCard(); }
+          else { mode = 'login'; drawCard(); }
+        } else {
+          await api('/auth/password-reset/confirm', { method: 'POST', body: {
+            token: RESET_TOKEN, new_password: newPassword.value } });
+          RESET_TOKEN = null;
+          history.replaceState(null, '', location.pathname);
+          toast('Password updated. Please sign in.');
+          mode = 'login'; drawCard();
+        }
       } catch (err) { toast(err.message, 'error'); }
-      finally { btn.disabled = false; btn.textContent = mode === 'login' ? 'Sign in' : 'Create account'; }
+      finally { btn.disabled = false; btn.textContent = btnLabel; }
     });
 
-    card.appendChild(el('div', {}, el('h2', {}, mode === 'login' ? 'Sign in to AgroSphere' : 'Join AgroSphere'),
-      el('p', { style: 'color:var(--text-2);margin:6px 0 20px;font-size:.9rem' },
-        mode === 'login' ? 'Use a demo account below or your own credentials.' : 'Create your account to begin.')));
-    card.appendChild(tabs);
     card.appendChild(form);
 
     if (mode === 'login') {
-      card.appendChild(el('div', { style: 'margin:22px 0 10px;font-size:.74rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-3);font-weight:700' }, 'Demo accounts'));
-      const grid = el('div', { class: 'demo-grid' });
-      for (const a of DEMO_ACCOUNTS) {
-        grid.appendChild(el('button', {
-          class: 'demo-account', type: 'button',
-          onclick: () => { email.value = a.email; password.value = a.password; },
-        },
-          el('img', { src: img(a.image), alt: a.label }),
-          el('div', {}, el('b', {}, a.label), el('small', {}, a.email)),
-        ));
-      }
-      card.appendChild(grid);
+      card.appendChild(el('div', { style: 'margin-top:14px;text-align:center' },
+        el('button', { class: 'link-btn', type: 'button', onclick: () => { mode = 'forgot'; drawCard(); } }, 'Forgot password?')));
+    } else {
+      card.appendChild(el('div', { style: 'margin-top:14px;text-align:center' },
+        el('button', { class: 'link-btn', type: 'button', onclick: () => { RESET_TOKEN = null; mode = 'login'; drawCard(); } }, '← Back to sign in')));
     }
   }
   drawCard();
-  wrap.append(hero, el('div', { class: 'auth-panel' }, card));
+  const panel = el('div', { class: 'auth-panel' },
+    el('div', { class: 'auth-stack' }, aboutModule(), card),
+  );
+  wrap.append(hero, panel);
   app.appendChild(wrap);
 }
 
-const DEMO_ACCOUNTS = [
-  { email: 'farmer@agrosphere.in', password: 'agro1234', label: 'Farmer — Ramesh Patil', image: 'role_farmer' },
-  { email: 'agronomist@agrosphere.in', password: 'agro1234', label: 'Agronomist — Dr. Anjali Deshmukh', image: 'role_agronomist' },
-  { email: 'manager@agrosphere.in', password: 'agro1234', label: 'Farm Manager — Suresh Kulkarni', image: 'role_manager' },
-  { email: 'operator@agrosphere.in', password: 'agro1234', label: 'Drone Operator — Vikram Singh', image: 'role_drone_operator' },
-  { email: 'admin@agrosphere.in', password: 'agro1234', label: 'Super Admin — Priya Nair', image: 'role_admin' },
-];
+/* ------------------------------------------------------------- about module */
+/* Sits above the sign-in card on the home screen: what AgroSphere is, over a
+ * generated image of a drone over a Punjab wheat field, blurred so the copy
+ * stays readable. */
+function aboutModule() {
+  const features = [
+    ['🛰', 'Drone operations', 'Mission planning, pre-flight checks and a clearly-labelled simulator.'],
+    ['🧠', 'AI crop health', 'Camera and drone frames assessed in seconds, in your own language.'],
+    ['🗺', 'Geospatial records', 'Farms geotagged at registration, with real road directions to reach them.'],
+    ['⛅', 'Weather intelligence', 'Spray windows and disease pressure, not just a forecast.'],
+    ['₹', 'Treatment & costing', 'Approved plans, transparent costing and downloadable PDF reports.'],
+    ['🔒', 'Five enforced roles', 'Farmer, agronomist, farm manager, drone operator and administrator.'],
+  ];
+  return el('div', { class: 'auth-about' },
+    el('div', { class: 'auth-about-bg' },
+      el('img', { src: img('signin_hero'), alt: 'Agricultural drone over a Punjab wheat field', loading: 'eager' }),
+    ),
+    el('div', { class: 'auth-about-body' },
+      el('span', { class: 'auth-about-tag' }, '✦ AI-powered agriculture platform'),
+      el('h2', {}, 'From field capture to verified treatment'),
+      el('p', { class: 'auth-about-lead' },
+        'AgroSphere connects Indian farmers, agronomists, farm managers and drone operators on one secure, multilingual platform — geotagged farms, live field tracking, AI disease detection and costed treatment plans, all the way to a downloadable report.'),
+      el('div', { class: 'auth-about-grid' },
+        ...features.map(([icon, title, body]) => el('div', { class: 'auth-feature' },
+          el('span', { class: 'auth-feature-ic' }, icon),
+          el('div', {}, el('b', {}, title), el('span', {}, body)),
+        )),
+      ),
+    ),
+  );
+}
 
 /* --------------------------------------------------------------- shell */
 function render() {
+  ctx.setSession(ME, META);
   if (!ME) { viewAuth(); return; }
   app.replaceChildren();
   const shell = el('div', { class: 'shell' });
@@ -168,10 +272,10 @@ function buildSidebar() {
   ));
   const nav = el('nav', { class: 'nav' });
   const groups = [
-    ['Workspace', ['dashboard', 'modules', 'analytics']],
-    ['Operations', ['farms', 'cases', 'reports']],
-    ['Field services', ['drone', 'fleet', 'payments']],
-    ['Engagement', ['notifications', 'grievances', 'knowledge']],
+    ['Workspace', ['dashboard', 'modules', 'map', 'analytics']],
+    ['Operations', ['farms', 'cases', 'capture', 'reports']],
+    ['Field services', ['drone', 'fleet', 'weather', 'payments']],
+    ['Engagement', ['notifications', 'grievances', 'knowledge', 'advisor']],
     ['Governance', ['admin', 'audit', 'settings']],
   ];
   for (const [label, keys] of groups) {
@@ -302,7 +406,51 @@ async function viewDashboard(root) {
     'Server-side role enforcement is active: each action you can take is validated by the API, not just hidden in the interface.'));
   cols.appendChild(roleCard);
 
+  cols.appendChild(await weatherWidget());
+
   root.appendChild(await moduleStrip());
+}
+
+/* A compact weather card for the dashboard: current conditions, the next spray
+ * window and disease pressure, with a link into the full weather module. */
+async function weatherWidget() {
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('div', { class: 'card-head' }, el('h3', { class: 'grow' }, 'Field weather'),
+    el('button', { class: 'btn ghost sm', onclick: () => navigate('weather') }, 'Open')));
+  const body = el('div', {});
+  card.appendChild(body);
+  body.appendChild(el('div', { class: 'skeleton', style: 'height:120px' }));
+  try {
+    const farms = await api('/farms');
+    if (!farms.length) { body.replaceChildren(el('div', { class: 'alert' }, 'Add a farm with coordinates to see field weather.')); return card; }
+    const w = await api(`/weather?farm_id=${farms[0].id}&days=3`);
+    const dp = w.disease_pressure || {};
+    const sw = w.spray_windows || {};
+    const nxt = sw.next_open;
+    body.replaceChildren(
+      el('div', { style: 'font-size:.82rem;color:var(--text-3);margin-bottom:8px' }, `${w.location?.name || ''} · ${w.current?.condition || ''}`),
+      el('div', { class: 'weather-grid' },
+        tileMini('Temp', `${w.current?.temperature_c ?? '—'}°C`),
+        tileMini('Wind', `${w.current?.wind_kmh ?? '—'} km/h`),
+        tileMini('Humidity', `${w.current?.humidity_pct ?? '—'}%`)),
+      el('div', { class: 'pressure-meter', style: 'margin-top:12px' },
+        el('div', { class: `pressure-ring ${dp.band || 'unknown'}`, style: 'width:58px;height:58px;font-size:.95rem' }, `${dp.index ?? 0}`),
+        el('div', {}, el('b', {}, `${titleCase(dp.band || 'unknown')} disease pressure`),
+          el('div', { style: 'font-size:.78rem;color:var(--text-3)' }, (dp.drivers || [])[0] || 'No notable drivers'))) ,
+      el('div', { class: 'alert ' + (nxt ? 'info' : 'warn'), style: 'margin-top:10px' },
+        nxt ? `Next spray window: ${(nxt.time || '').replace('T', ' ')} (wind ${nxt.wind_kmh} km/h, rain ${nxt.rain_prob_pct}%)`
+            : 'No spray window in the next 48 hours.'),
+      el('div', { style: 'font-size:.82rem;margin-top:8px' }, (w.guidance?.crop_health || [])[0] || ''),
+    );
+  } catch (e) {
+    body.replaceChildren(el('div', { class: 'alert' }, `Weather unavailable: ${e.message}`));
+  }
+  return card;
+}
+
+function tileMini(k, v) {
+  return el('div', { class: 'weather-tile', style: 'padding:10px' },
+    el('div', { class: 'k' }, k), el('div', { class: 'v', style: 'font-size:1.15rem' }, v));
 }
 
 async function moduleStrip() {
@@ -366,6 +514,7 @@ async function viewFarms(root) {
       el('img', { src: img(farm.cover_image || 'hero'), style: 'width:52px;height:52px;border-radius:12px;object-fit:cover' }),
       el('div', { class: 'grow' }, el('h3', {}, farm.name),
         el('p', {}, `${farm.village || ''}${farm.district ? ', ' + farm.district : ''}${farm.state ? ', ' + farm.state : ''} · ${farm.total_acres} acres`)),
+      el('button', { class: 'btn ghost sm', onclick: () => directionsModal(farm) }, '🧭 Directions'),
     ));
     const fg = el('div', { class: 'grid c3' });
     for (const f of farm.fields) {
@@ -422,14 +571,39 @@ function newFarmModal(done) {
   const state = input('state', { placeholder: 'State' });
   const lat = input('latitude', { type: 'number', step: 'any', placeholder: '18.87' });
   const lon = input('longitude', { type: 'number', step: 'any', placeholder: '73.91' });
+  const geoLine = el('div', { class: 'geo-line' }, 'No pin set. Geotag the farm to fill village, district and state automatically.');
+
+  // Geotagging fills the administrative fields from the pin, so a farmer does
+  // not have to know which district a coordinate falls in.
+  function applyGeo(p) {
+    lat.value = p.lat.toFixed(6);
+    lon.value = p.lon.toFixed(6);
+    if (p.address) {
+      if (!village.value && p.address.village) village.value = p.address.village;
+      if (!district.value && p.address.district) district.value = p.address.district;
+      if (!state.value && p.address.state) state.value = p.address.state;
+      geoLine.textContent = `📍 ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} — ${p.address.formatted || ''}`;
+    } else {
+      geoLine.textContent = `📍 ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
+    }
+  }
+
   const body = el('div', {},
     field('Farm name', name), field('Village', village),
     el('div', { class: 'grid c2' }, field('District', district), field('State', state)),
     el('div', { class: 'grid c2' }, field('Latitude', lat), field('Longitude', lon)),
-    el('div', { class: 'alert info' }, 'Coordinates are used for map display and geofence checks. Location consent is recorded against your profile.'),
+    el('div', { class: 'map-toolbar' },
+      el('button', { class: 'btn ghost sm', type: 'button', onclick: () => geotagFarmModal({ onPick: applyGeo }) }, '🗺 Geotag on map'),
+      el('button', { class: 'btn ghost sm', type: 'button', onclick: async () => {
+        try { const p = await currentPosition(); applyGeo({ lat: p.lat, lon: p.lon }); }
+        catch (e) { toast(e.message, 'error'); }
+      } }, '📍 Use my location'),
+    ),
+    geoLine,
+    el('div', { class: 'alert info' }, 'Coordinates are used for map display, geofence checks and directions. Location consent is recorded against your profile.'),
   );
   const m = modal({
-    title: 'Create a farm', body,
+    title: 'Create a farm', body, wide: true,
     footer: [el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
       el('button', { class: 'btn', onclick: async () => {
         try {
@@ -640,7 +814,7 @@ async function openCase(id) {
         el('dt', {}, 'Total'), el('dd', {}, inr(c.invoice.total)),
         el('dt', {}, 'Status'), el('dd', {}, chip(titleCase(c.invoice.status), c.invoice.status === 'paid' ? 'green' : 'gold')),
         el('dt', {}, 'Provider'), el('dd', {}, c.invoice.provider)),
-      ME.role === 'farmer' && c.invoice.status !== 'paid'
+      ['farmer', 'super_admin'].includes(ME.role) && c.invoice.status !== 'paid'
         ? el('button', { class: 'btn', style: 'margin-top:12px', onclick: async () => {
             try { await api(`/invoices/${c.invoice.id}/pay`, { method: 'POST' }); toast('Payment recorded'); m.close(); openCase(id); }
             catch (e) { toast(e.message, 'error'); }
@@ -671,28 +845,31 @@ async function openCase(id) {
 function caseActions(c, reload) {
   const out = [];
   const R = ME.role;
+  // A super administrator may drive any workflow step on behalf of the role
+  // that owns it; the server enforces the same rule.
+  const is = (...roles) => roles.includes(R) || R === 'super_admin';
   const act = (label, cls, fn) => el('button', { class: `btn ${cls}`, onclick: fn }, label);
   const post = (path, body, msg) => async () => {
     try { await api(path, { method: 'POST', body }); toast(msg); reload(); }
     catch (e) { toast(e.message, 'error'); }
   };
 
-  if (R === 'farmer' && c.state === 'draft') out.push(act('Capture imagery', '', post(`/cases/${c.id}/capture`, undefined, 'Imagery captured')));
-  if (R === 'farmer' && c.state === 'imagery_captured') out.push(act('Run AI analysis', '', post(`/cases/${c.id}/analyze`, undefined, 'Analysis complete')));
-  if (R === 'farmer' && c.state === 'ai_findings_ready') out.push(act('Submit for agronomist review', '', post(`/cases/${c.id}/submit`, undefined, 'Submitted')));
-  if (R === 'agronomist' && ['awaiting_agronomist', 'reopened'].includes(c.state)) {
+  if (is('farmer') && c.state === 'draft') out.push(act('Capture imagery', '', post(`/cases/${c.id}/capture`, undefined, 'Imagery captured')));
+  if (is('farmer') && c.state === 'imagery_captured') out.push(act('Run AI analysis', '', post(`/cases/${c.id}/analyze`, undefined, 'Analysis complete')));
+  if (is('farmer') && c.state === 'ai_findings_ready') out.push(act('Submit for agronomist review', '', post(`/cases/${c.id}/submit`, undefined, 'Submitted')));
+  if (is('agronomist') && ['awaiting_agronomist', 'reopened'].includes(c.state)) {
     out.push(act('Confirm findings', '', post(`/cases/${c.id}/review`, { decision: 'confirm', notes: 'Confirmed from field imagery.' }, 'Findings confirmed')));
     out.push(act('Reject case', 'danger', post(`/cases/${c.id}/review`, { decision: 'reject', notes: 'Insufficient evidence.' }, 'Case rejected')));
     out.push(act('Prepare treatment plan', 'gold', () => planModal(c, reload)));
   }
-  if (R === 'agronomist' && c.state === 'needs_revision') out.push(act('Revise treatment plan', 'gold', () => planModal(c, reload)));
-  if (R === 'farm_manager' && c.state === 'awaiting_manager') out.push(act('Costing & approve', '', () => costModal(c, reload)));
-  if (R === 'farmer' && c.state === 'awaiting_farmer') {
+  if (is('agronomist') && c.state === 'needs_revision') out.push(act('Revise treatment plan', 'gold', () => planModal(c, reload)));
+  if (is('farm_manager') && c.state === 'awaiting_manager') out.push(act('Costing & approve', '', () => costModal(c, reload)));
+  if (is('farmer') && c.state === 'awaiting_farmer') {
     out.push(act('Choose self-implementation', 'ghost', post(`/cases/${c.id}/choose-implementation`, { choice: 'self' }, 'Self implementation chosen')));
     out.push(act('Request drone service', '', post(`/cases/${c.id}/choose-implementation`, { choice: 'drone' }, 'Drone service requested')));
   }
-  if (R === 'farm_manager' && c.state === 'implementation_chosen') out.push(act('Assign operator', '', () => assignModal(c, reload)));
-  if (R === 'drone_operator' && c.job && ['job_assigned', 'in_progress'].includes(c.state)) {
+  if (is('farm_manager') && c.state === 'implementation_chosen') out.push(act('Assign operator', '', () => assignModal(c, reload)));
+  if (is('drone_operator') && c.job && ['job_assigned', 'in_progress'].includes(c.state)) {
     out.push(act('Pre-flight checks', 'ghost', async () => {
       try { const r = await api(`/jobs/${c.job.id}/preflight`, { method: 'POST' }); toast(r.ready ? 'Pre-flight passed' : 'Pre-flight issues found', r.ready ? 'ok' : 'warn'); reload(); }
       catch (e) { toast(e.message, 'error'); }
@@ -700,16 +877,16 @@ function caseActions(c, reload) {
     if (c.state === 'job_assigned') out.push(act('Start mission', '', post(`/jobs/${c.job.id}/start`, undefined, 'Mission started (simulated)')));
     if (c.state === 'in_progress') out.push(act('Complete mission', '', post(`/jobs/${c.job.id}/complete`, {}, 'Mission completed (simulated)')));
   }
-  if (['completed', 'in_progress'].includes(c.state) && ['farmer', 'agronomist'].includes(R)) {
+  if (['completed', 'in_progress'].includes(c.state) && is('farmer', 'agronomist')) {
     out.push(act('Schedule follow-up', 'ghost', post(`/cases/${c.id}/follow-up`, undefined, 'Follow-up scheduled')));
   }
-  if (['completed', 'follow_up'].includes(c.state) && ['farmer', 'super_admin'].includes(R)) {
+  if (['completed', 'follow_up'].includes(c.state) && is('farmer')) {
     out.push(act('Close case', '', async () => {
       try { await api(`/cases/${c.id}/close?outcome=Outcome+recorded`, { method: 'POST' }); toast('Case closed'); reload(); }
       catch (e) { toast(e.message, 'error'); }
     }));
   }
-  if (['closed', 'rejected'].includes(c.state) && ['farmer', 'super_admin'].includes(R)) {
+  if (['closed', 'rejected'].includes(c.state) && is('farmer')) {
     out.push(act('Reopen case', 'ghost', post(`/cases/${c.id}/reopen`, undefined, 'Case reopened')));
   }
   out.push(act('View report', 'ghost', () => reportModal(c.id)));
@@ -726,6 +903,36 @@ function planModal(c, done) {
   const measures = el('textarea', { name: 'measures' });
   measures.value = (c.plan?.measures || ['Remove infected debris', 'Maintain spacing for airflow', 'Apply approved product as per label']).join('\n');
   const follow = input('follow_up', { value: c.plan?.follow_up || 'Re-inspect after 7 days' });
+
+  // Ask the AI to draft the plan from the confirmed finding and the local
+  // weather, then let the agronomist edit it before it is sent for costing.
+  async function draftFromAi(btn) {
+    const problemText = problem.value || c.analyses?.[0]?.findings?.[0]?.label;
+    if (!problemText) return toast('Enter or confirm a problem first', 'error');
+    btn.disabled = true; const label = btn.textContent; btn.textContent = 'Drafting…';
+    try {
+      const d = await api('/ai/treatment-draft', { method: 'POST', body: {
+        problem: problemText, crop: c.field?.crop || 'crop',
+        severity: c.severity || 'medium', language: ME.language || 'en', case_id: c.id,
+      } });
+      problem.value = d.problem || problem.value;
+      if (d.measures?.length) measures.value = d.measures.join('\n');
+      if (d.dosage) dosage.value = d.dosage;
+      if (d.ppe) ppe.value = d.ppe;
+      if (d.pre_harvest_interval) phi.value = d.pre_harvest_interval;
+      if (d.follow_up) follow.value = d.follow_up;
+      if (d.product) {
+        const opt = [...product.options].find(o => o.value === d.product);
+        if (!opt) product.appendChild(el('option', { value: d.product }, d.product));
+        product.value = d.product;
+      }
+      if (d.weather_restrictions) weatherHint.textContent = `Weather: ${d.weather_restrictions}`;
+      toast(d.mode === 'live' ? 'AI draft applied — review before sending' : 'Template draft applied — review before sending');
+    } catch (e) { toast(e.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  }
+
+  const weatherHint = el('div', { class: 'geo-line' }, 'Weather guidance is added automatically when you draft.');
   const body = el('div', {},
     field('Suspected / confirmed problem', problem),
     field('Approved product', product, 'Only label-approved products can be referenced.'),
@@ -733,11 +940,14 @@ function planModal(c, done) {
     el('div', { class: 'grid c2' }, field('Pre-harvest interval', phi), field('PPE', ppe)),
     field('Measures (one per line)', measures),
     field('Follow-up schedule', follow),
+    weatherHint,
     el('div', { class: 'alert warn' }, 'An uncertain AI diagnosis is never auto-converted into a spraying command. Safety validation is applied on the server.'),
   );
   const m = modal({
     title: 'Treatment plan', body, wide: true,
-    footer: [el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+    footer: [
+      el('button', { class: 'btn ghost', onclick: (e) => draftFromAi(e.currentTarget) }, '✦ Draft with AI'),
+      el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
       el('button', { class: 'btn gold', onclick: async () => {
         try {
           await api(`/cases/${c.id}/plan`, { method: 'POST', body: {
@@ -845,7 +1055,29 @@ async function reportModal(caseId) {
     for (const s of r.sources) body.appendChild(el('div', { class: 'alert', style: 'margin-bottom:6px' }, `${s.title} — ${s.organization} (v${s.version})`));
   }
   body.appendChild(el('div', { class: 'alert warn', style: 'margin-top:14px' }, r.disclaimer));
-  modal({ title: 'Field report', body, wide: true, footer: [el('button', { class: 'btn ghost', onclick: () => window.print() }, '🖨 Print / Save PDF')] });
+
+  // Download the same report as a server-rendered PDF.
+  const downloadPdf = async (btn) => {
+    btn.disabled = true; const label = btn.textContent; btn.textContent = 'Preparing…';
+    try {
+      const res = await fetch(`/api/cases/${caseId}/report/pdf`, {
+        headers: API.token ? { Authorization: `Bearer ${API.token}` } : {},
+      });
+      if (!res.ok) throw new Error(`Could not generate the PDF (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = el('a', { href: url, download: `${r.report_id}.pdf` });
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast('Report downloaded');
+    } catch (e) { toast(e.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  };
+
+  modal({ title: 'Field report', body, wide: true, footer: [
+    el('button', { class: 'btn ghost', onclick: () => window.print() }, '🖨 Print'),
+    el('button', { class: 'btn', onclick: (e) => downloadPdf(e.currentTarget) }, '⬇ Download PDF'),
+  ] });
 }
 
 /* --------------------------------------------------------------- drone ops */
@@ -904,7 +1136,7 @@ async function viewFleet(root) {
   try { drones = await api('/drones'); } catch (e) { toast(e.message, 'error'); }
   const head = el('div', { class: 'page-head' }, el('div', { class: 'grow' },
     el('h2', {}, 'Registered devices'), el('p', {}, `${drones.length} device(s) in the fleet.`)));
-  if (ME.role === 'drone_operator') head.appendChild(el('button', { class: 'btn', onclick: () => droneModal(() => viewFleet(root)) }, '＋ Register drone'));
+  if (['drone_operator', 'super_admin'].includes(ME.role)) head.appendChild(el('button', { class: 'btn', onclick: () => droneModal(() => viewFleet(root)) }, '＋ Register drone'));
   root.appendChild(head);
 
   const grid = el('div', { class: 'grid c3' });
@@ -1006,7 +1238,7 @@ async function viewPayments(root) {
       el('td', { class: 'strong' }, i.number),
       el('td', {}, inr(i.amount)), el('td', {}, inr(i.tax)), el('td', {}, el('b', {}, inr(i.total))),
       el('td', {}, chip(titleCase(i.status), i.status === 'paid' ? 'green' : 'gold')),
-      el('td', {}, ME.role === 'farmer' && i.status !== 'paid'
+      el('td', {}, ['farmer', 'super_admin'].includes(ME.role) && i.status !== 'paid'
         ? el('button', { class: 'btn sm', onclick: async () => {
             try { await api(`/invoices/${i.id}/pay`, { method: 'POST' }); toast('Payment recorded (sandbox)'); viewPayments(root.replaceChildren() || root); }
             catch (e) { toast(e.message, 'error'); }
@@ -1205,22 +1437,34 @@ async function viewAdmin(root) {
 
   const cols = el('div', { class: 'grid c2', style: 'margin-top:18px' });
   const uc = el('div', { class: 'card pad-0' });
-  uc.appendChild(el('div', { class: 'card-head', style: 'padding:20px 20px 0' }, el('h3', { class: 'grow' }, 'Users & roles')));
+  uc.appendChild(el('div', { class: 'card-head', style: 'padding:20px 20px 0' },
+    el('h3', { class: 'grow' }, 'Users & roles'),
+    el('button', { class: 'btn sm', onclick: () => createUserModal(() => viewAdmin(root.replaceChildren() || root)) }, '＋ Create user')));
   const tbl = el('table', { class: 'table' });
-  tbl.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Role'), el('th', {}, 'Verification'), el('th', {}, ''))));
+  tbl.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Role'), el('th', {}, 'Verification'), el('th', {}, 'Actions'))));
   const tb = el('tbody');
   for (const u of users) {
+    const isSelf = u.id === ME.id;
     tb.appendChild(el('tr', { style: 'cursor:default' },
       el('td', {}, el('div', { style: 'display:flex;gap:8px;align-items:center' },
         el('img', { src: img(u.avatar_image), style: 'width:30px;height:30px;border-radius:8px;object-fit:cover' }),
-        el('div', {}, el('b', { style: 'font-size:.85rem' }, u.full_name), el('div', { style: 'font-size:.74rem;color:var(--text-3)' }, u.email)))),
+        el('div', {}, el('b', { style: 'font-size:.85rem' }, u.full_name),
+          el('div', { style: 'font-size:.74rem;color:var(--text-3)' }, u.email + (isSelf ? ' · you' : ''))))),
       el('td', {}, chip(u.role_label, 'blue')),
       el('td', {}, chip(titleCase(u.verification_status), u.verification_status === 'verified' ? 'green' : 'gold')),
-      el('td', {}, u.verification_status !== 'verified'
-        ? el('button', { class: 'btn sm', onclick: async () => {
-            try { await api(`/admin/users/${u.id}/verify?decision=verified`, { method: 'POST' }); toast('Verified'); viewAdmin(root.replaceChildren() || root); }
-            catch (e) { toast(e.message, 'error'); }
-          } }, 'Verify') : null),
+      el('td', {}, el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
+        el('button', { class: 'btn ghost sm', onclick: () => roleModal(u, () => viewAdmin(root.replaceChildren() || root)) }, 'Change role'),
+        u.verification_status !== 'verified'
+          ? el('button', { class: 'btn sm', onclick: async () => {
+              try { await api(`/admin/users/${u.id}/verify?decision=verified`, { method: 'POST' }); toast('Verified'); viewAdmin(root.replaceChildren() || root); }
+              catch (e) { toast(e.message, 'error'); }
+            } }, 'Verify')
+          : null,
+        !isSelf ? el('button', { class: 'btn ghost sm', title: 'Sign this user out of all devices', onclick: async () => {
+          try { await api(`/admin/users/${u.id}/revoke-sessions`, { method: 'POST' }); toast('Sessions revoked'); }
+          catch (e) { toast(e.message, 'error'); }
+        } }, 'Revoke sessions') : null,
+      )),
     ));
   }
   tbl.appendChild(tb); uc.appendChild(tbl); cols.appendChild(uc);
@@ -1238,6 +1482,60 @@ async function viewAdmin(root) {
   }
   cols.appendChild(fc);
   root.appendChild(cols);
+}
+
+function createUserModal(done) {
+  const email = input('email', { type: 'email', placeholder: 'name@example.com' });
+  const fullname = input('full_name', { placeholder: 'Full name' });
+  const password = input('password', { type: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' });
+  const roleSel = select('role', (META?.roles || []).map(r => ({ value: r.key, label: r.label })));
+  const langSel = select('language', (META?.languages || []).map(l => ({ value: l.code, label: `${l.native} — ${l.name}` })));
+  const verifySel = select('verification_status', [
+    { value: 'pending', label: 'Pending' }, { value: 'verified', label: 'Verified', selected: true },
+  ]);
+  const body = el('div', {},
+    el('div', { class: 'alert info' }, 'Administrators may create accounts with any role, including super administrator. This action is recorded in the audit trail.'),
+    field('Email', email), field('Full name', fullname), field('Temporary password', password),
+    el('div', { class: 'grid c2' }, field('Role', roleSel), field('Verification', verifySel)),
+    field('Preferred language', langSel),
+  );
+  const m = modal({
+    title: 'Create user', body, wide: true,
+    footer: [
+      el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+      el('button', { class: 'btn', onclick: async () => {
+        try {
+          await api('/admin/users', { method: 'POST', body: {
+            email: email.value, full_name: fullname.value, password: password.value,
+            role: roleSel.value, language: langSel.value, verification_status: verifySel.value } });
+          toast('User created'); m.close(); done();
+        } catch (e) { toast(e.message, 'error'); }
+      } }, 'Create user'),
+    ],
+  });
+}
+
+function roleModal(u, done) {
+  const sel = select('role', (META?.roles || []).map(r => ({ value: r.key, label: r.label, selected: r.key === u.role })));
+  const reason = input('reason', { placeholder: 'Reason (recorded in the audit trail)' });
+  const body = el('div', {},
+    el('div', { class: 'alert info' }, `Changing the role of ${u.full_name} (${u.email}).`),
+    field('Role', sel, 'The user is signed out of all devices and must sign in again to receive the new permissions.'),
+    field('Reason', reason),
+    el('div', { class: 'alert warn' }, 'You cannot remove your own administrator role, and the last super administrator cannot be demoted.'),
+  );
+  const m = modal({
+    title: 'Change role', body,
+    footer: [
+      el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+      el('button', { class: 'btn', onclick: async () => {
+        try {
+          await api(`/admin/users/${u.id}/role`, { method: 'PATCH', body: { role: sel.value, reason: reason.value || null } });
+          toast(`${u.full_name} is now ${sel.options[sel.selectedIndex].text}`); m.close(); done();
+        } catch (e) { toast(e.message, 'error'); }
+      } }, 'Save role'),
+    ],
+  });
 }
 
 /* --------------------------------------------------------------- audit */
@@ -1269,6 +1567,61 @@ async function viewAudit(root) {
       el('td', { style: 'font-size:.8rem;color:var(--text-3)' }, fmtDate(e.at))));
   }
   tbl.appendChild(tb); card.appendChild(tbl); root.appendChild(card);
+}
+
+/* --------------------------------------------------------------- AI advisor */
+async function viewAdvisor(root) {
+  const live = META?.ai?.mode === 'live';
+  root.appendChild(moduleHero({
+    image: 'module_advisor', tag: 'AI advisory',
+    title: 'AI farm advisor',
+    body: 'Ask a question about crops, pests, nutrients or safety in your own language. Answers are general guidance only and are never a diagnosis or a spraying command.',
+  }));
+
+  const grid = el('div', { class: 'grid c3' });
+  grid.append(
+    statCard('Provider', META?.ai?.provider || 'simulated', META?.ai?.model || '', live ? 'green' : 'gold'),
+    statCard('Mode', live ? 'Live' : 'Simulated', live ? 'Live AI responses' : 'Labelled simulated replies', live ? 'green' : 'gold'),
+    statCard('Languages', (META?.languages || []).length, 'Answer in your language'),
+  );
+  root.appendChild(grid);
+
+  const card = el('div', { class: 'card', style: 'margin-top:18px' });
+  card.appendChild(el('div', { class: 'card-head' }, el('h3', { class: 'grow' }, 'Ask the advisor')));
+  if (!live) {
+    card.appendChild(el('div', { class: 'alert warn' },
+      'No live AI provider is configured, so replies are clearly-labelled simulated output. An administrator can enable a live provider on the server.'));
+  }
+  const q = el('textarea', { name: 'question', placeholder: 'e.g. My cotton leaves are curling with whitefly on the underside. What should I check first?', rows: '3' });
+  const langSel = select('language', (META?.languages || []).map(l => ({ value: l.code, label: `${l.native} — ${l.name}`, selected: l.code === (ME.language || 'en') })));
+  const cropIn = input('crop', { placeholder: 'Crop (optional), e.g. cotton' });
+  const ask = el('button', { class: 'btn' }, 'Ask');
+  const out = el('div', { style: 'margin-top:16px' });
+  card.append(field('Your question', q), el('div', { class: 'grid c2' }, field('Language', langSel), field('Crop', cropIn)), ask, out);
+
+  ask.addEventListener('click', async () => {
+    const question = q.value.trim();
+    if (question.length < 3) return toast('Please enter a question', 'error');
+    ask.disabled = true; ask.textContent = 'Thinking…';
+    out.replaceChildren(el('div', { class: 'alert info' }, 'Contacting the AI advisor…'));
+    try {
+      const res = await api('/advisor', { method: 'POST', body: {
+        question, language: langSel.value, crop: cropIn.value.trim() || null } });
+      out.replaceChildren(
+        el('div', { class: 'card', style: 'background:var(--surface-2)' },
+          el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px' },
+            chip(res.mode === 'live' ? 'Live AI' : 'Simulated', res.mode === 'live' ? 'green' : 'gold'),
+            chip(res.model || 'model', 'blue'),
+            chip(res.language || langSel.value, 'grey')),
+          el('div', { style: 'white-space:pre-wrap;font-size:.9rem;line-height:1.55' }, res.answer)),
+        el('div', { class: 'alert warn', style: 'margin-top:12px' },
+          'This is general guidance, not a diagnosis. Confirm with a qualified agronomist before any treatment.'),
+      );
+    } catch (e) {
+      out.replaceChildren(el('div', { class: 'alert danger' }, e.message));
+    } finally { ask.disabled = false; ask.textContent = 'Ask'; }
+  });
+  root.appendChild(card);
 }
 
 /* --------------------------------------------------------------- settings */
@@ -1326,6 +1679,37 @@ function viewSettings(root) {
   }
   consentCard.appendChild(el('div', { class: 'alert info', style: 'margin-top:12px' }, 'Data minimization and applicable Indian data-protection requirements are enforced server-side.'));
   cols.appendChild(consentCard);
+
+  // Security: change the signed-in user's own password.
+  const pwCard = el('div', { class: 'card' });
+  pwCard.appendChild(el('div', { class: 'card-head' }, el('div', { class: 'grow' },
+    el('h3', {}, 'Password'), el('p', {}, 'Change the password for your account. You will stay signed in on this device.'))));
+  const cur = input('current_password', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password' });
+  const nw = input('new_password', { type: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' });
+  const cf = input('confirm_password', { type: 'password', placeholder: 'Repeat new password', autocomplete: 'new-password' });
+  const pwForm = el('form', {},
+    field('Current password', cur), field('New password', nw), field('Confirm new password', cf));
+  const pwBtn = el('button', { class: 'btn', type: 'submit' }, 'Update password');
+  pwForm.appendChild(pwBtn);
+  pwForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (nw.value !== cf.value) return toast('The two passwords do not match', 'error');
+    if (nw.value.length < 8) return toast('New password must be at least 8 characters', 'error');
+    pwBtn.disabled = true; pwBtn.textContent = 'Please wait…';
+    try {
+      const res = await api('/auth/password/change', { method: 'POST', body: {
+        current_password: cur.value, new_password: nw.value } });
+      // The server revokes old sessions and issues a replacement for this one.
+      if (res.token) setSession(res.token, ME);
+      toast('Password updated');
+      pwForm.reset();
+    } catch (err) { toast(err.message, 'error'); }
+    finally { pwBtn.disabled = false; pwBtn.textContent = 'Update password'; }
+  });
+  pwCard.appendChild(pwForm);
+  pwCard.appendChild(el('div', { class: 'alert info', style: 'margin-top:12px' },
+    'Changing your password signs out every other device. Forgotten your password? Use “Forgot password?” on the sign-in screen.'));
+  cols.appendChild(pwCard);
 
   root.appendChild(cols);
 

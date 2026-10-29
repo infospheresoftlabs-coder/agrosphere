@@ -30,3 +30,30 @@ services:
         fromDatabase:
           name: agrosphere-db
           property: connectionString
+      # AI features. Set AGROSPHERE_AI_API_KEY in the Render dashboard (secret).
+      # Without a key the app runs its clearly-labelled deterministic simulator.
+      - key: AGROSPHERE_AI_PROVIDER
+        value: openrouter
+      - key: AGROSPHERE_AI_MODEL
+        value: openai/gpt-4o-mini
+      - key: AGROSPHERE_AI_API_KEY
+        sync: false
+      # Maps: Geoapify powers map tiles, geocoding, live tracking and routing.
+      # The key is a public, referrer-restricted browser key, so it is safe to
+      # serve to the frontend through /api/meta.
+      - key: GEOAPIFY_API_KEY
+        value: fc756a46747f4419891910a9e25cae07
+      - key: AGROSPHERE_MAPS_PROVIDER
+        value: geoapify
+      # Password-reset emails (optional). Without SMTP the reset link is only
+      # written to the server log, so configure this for real deployments.
+      - key: AGROSPHERE_SMTP_HOST
+        sync: false
+      - key: AGROSPHERE_SMTP_PORT
+        value: "587"
+      - key: AGROSPHERE_SMTP_USER
+        sync: false
+      - key: AGROSPHERE_SMTP_PASSWORD
+        sync: false
+      - key: AGROSPHERE_SMTP_FROM
+        sync: false

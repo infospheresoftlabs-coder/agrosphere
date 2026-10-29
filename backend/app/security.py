@@ -116,6 +116,10 @@ def create_token(user: User) -> str:
         "sub": user.id,
         "role": user.role,
         "email": user.email,
+        # Sessions are stamped with the account's credential epoch. Bumping the
+        # epoch (password reset, forced logout) makes every previously issued
+        # token fail validation, without a server-side session table.
+        "ep": user.session_epoch or 0,
         "exp": int(time.time()) + TOKEN_TTL_SECONDS,
     }
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
@@ -149,6 +153,12 @@ def current_user(
     user = db.get(User, payload["sub"])
     if user is None or user.status != "active":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account inactive")
+    # A token minted before the account's last credential change is stale.
+    if payload.get("ep", 0) != (user.session_epoch or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please sign in again.",
+        )
     return user
 
 

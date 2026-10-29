@@ -33,8 +33,15 @@ def call(method: str, path: str, body=None, token=None, raw=False):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            payload = r.read().decode()
-            return r.status, (payload if raw else (json.loads(payload) if payload else None))
+            payload = r.read()
+            if raw:
+                # Binary payloads (PDF reports) must not be force-decoded.
+                try:
+                    return r.status, payload.decode()
+                except UnicodeDecodeError:
+                    return r.status, payload
+            text = payload.decode()
+            return r.status, (json.loads(text) if text else None)
     except urllib.error.HTTPError as e:
         payload = e.read().decode()
         try:
@@ -259,8 +266,12 @@ def main() -> int:
     })
     check("self-registering as super_admin rejected", status == 403, f"{status} {esc}")
 
+    # Unique address per run so the suite is idempotent against a persistent DB.
+    import time as _time
+
+    probe_email = f"selfservice-probe-{int(_time.time())}@example.com"
     status, ok = call("POST", "/api/auth/register", {
-        "email": "selfservice-probe@example.com", "full_name": "Self Service",
+        "email": probe_email, "full_name": "Self Service",
         "password": "ProbePass123", "role": "farmer",
     })
     check("self-registering as farmer allowed", status == 201, f"{status} {ok}")
@@ -268,6 +279,116 @@ def main() -> int:
         check("new farmer gets farmer role", ok.get("user", {}).get("role") == "farmer")
         status, forbidden = call("GET", "/api/admin/users", token=ok.get("token"))
         check("new farmer cannot reach admin users", status == 403, str(status))
+
+    section("Weather intelligence")
+    status, farms = call("GET", "/api/farms", token=TOKENS["admin"])
+    check("farms listed for weather lookup", status == 200 and len(farms) > 0)
+    farm_id = farms[0]["id"] if farms else None
+    status, wx = call("GET", f"/api/weather?farm_id={farm_id}&days=5", token=TOKENS["admin"])
+    check("weather forecast returned", status == 200 and "current" in (wx or {}), str(status))
+    if status == 200:
+        check("weather includes spray windows", "spray_windows" in wx and "thresholds" in wx["spray_windows"])
+        check("weather includes disease pressure", wx["disease_pressure"]["band"] in {"low", "moderate", "high", "unknown"})
+        check("weather gives crop-health guidance", len(wx["guidance"]["crop_health"]) >= 1)
+        check("weather gives treatment guidance", len(wx["guidance"]["treatment"]) >= 1)
+        check("weather states a disclaimer", bool(wx.get("disclaimer")))
+        check("hourly hours carry a spray verdict", all("spray_ok" in h for h in wx["hourly"][:6]))
+    status, wxn = call("GET", "/api/weather", token=TOKENS["admin"])
+    check("weather without a location is rejected", status == 422, str(status))
+
+    section("Geospatial: search, reverse and directions")
+    status, search = call("POST", "/api/geo/search", {"text": "Pune Maharashtra", "limit": 3}, token=TOKENS["admin"])
+    check("place search returns results", status == 200 and len(search.get("results", [])) >= 1, str(status))
+    if search.get("results"):
+        r0 = search["results"][0]
+        check("place result carries coordinates", r0.get("latitude") is not None and r0.get("longitude") is not None)
+    status, rev = call("GET", "/api/geo/reverse?lat=18.5204&lon=73.8567", token=TOKENS["admin"])
+    check("reverse geocode resolves an address", status == 200 and bool(rev.get("formatted")), str(status))
+    status, direc = call("GET", f"/api/geo/directions/{farm_id}?from_lat=18.5204&from_lon=73.8567&mode=drive",
+                         token=TOKENS["admin"])
+    check("directions to a farm returned", status == 200 and "straight_line_km" in (direc or {}), str(status))
+    if status == 200:
+        check("directions include an origin and destination",
+              bool(direc.get("origin")) and bool(direc.get("destination")))
+        check("directions include a route or an explained fallback",
+              bool(direc.get("route")) or bool(direc.get("route_error")))
+    import time as _t
+    _s, outsider = call("POST", "/api/auth/register", {
+        "email": f"geo-outsider-{int(_t.time())}@example.com", "full_name": "Geo Outsider",
+        "password": "ProbePass123", "role": "farmer"})
+    outsider_token = (outsider or {}).get("token")
+    status, forbidden = call("GET", f"/api/geo/directions/{farm_id}?from_lat=18.5&from_lon=73.8",
+                             token=outsider_token)
+    check("directions enforce farm access", status in (403, 404), str(status))
+
+    section("Live location tracking")
+    status, ping = call("POST", "/api/tracking/ping",
+                        {"latitude": 18.8712, "longitude": 73.9123, "source": "person", "accuracy_m": 10},
+                        token=TOKENS["admin"])
+    check("location ping accepted", status == 201, f"{status} {ping}")
+    status, live = call("GET", "/api/tracking/live?max_age_min=60", token=TOKENS["admin"])
+    check("live actors returned", status == 200 and live.get("count", 0) >= 1, str(status))
+    if status == 200 and live.get("actors"):
+        check("live actor has a track and a latest fix",
+              "latest" in live["actors"][0] and "track" in live["actors"][0])
+    status, bad = call("POST", "/api/tracking/ping", {"latitude": 999, "longitude": 0}, token=TOKENS["admin"])
+    check("out-of-range latitude rejected", status == 422, str(status))
+
+    section("Live capture sessions")
+    status, sess = call("POST", "/api/live-sessions", {"device": "drone", "notes": "e2e sweep"},
+                        token=TOKENS["admin"])
+    check("live session started", status == 201 and sess.get("status") == "live", f"{status} {sess}")
+    if status == 201:
+        status, upd = call("PATCH", f"/api/live-sessions/{sess['id']}",
+                           {"latitude": 18.87, "longitude": 73.91, "frames": 4, "geotagged_frames": 3},
+                           token=TOKENS["admin"])
+        check("live session accepts frames and geotags",
+              status == 200 and upd.get("frames") == 4 and upd.get("geotagged_frames") == 3)
+        status, ended = call("POST", f"/api/live-sessions/{sess['id']}/end", {}, token=TOKENS["admin"])
+        check("live session can be ended", status == 200 and ended.get("status") == "ended")
+
+    section("Real-time AI vision analysis")
+    # A 1x1 PNG is enough to prove the frame path and the response contract.
+    import base64 as _b64
+    tiny = ("data:image/png;base64," + _b64.b64encode(_b64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==")).decode())
+    status, frame = call("POST", "/api/ai/analyze-frame",
+                         {"image": tiny, "crop": "wheat", "observations": "orange pustules"},
+                         token=TOKENS["admin"])
+    check("frame analysis returned", status == 200 and "analysis" in (frame or {}), str(status))
+    if status == 200:
+        a = frame["analysis"]
+        check("frame analysis yields findings", len(a.get("findings", [])) >= 1)
+        check("frame analysis is labelled preliminary", a.get("preliminary") is True)
+        check("frame analysis reports a mode", a.get("mode") in {"live", "simulated", "simulated-fallback"})
+        check("frame analysis states uncertainty", 0 <= a.get("uncertainty", -1) <= 1)
+    status, rejected = call("POST", "/api/ai/analyze-frame", {"image": "not-a-data-url"}, token=TOKENS["admin"])
+    check("non data-URL frame rejected", status == 422, str(status))
+
+    section("AI treatment drafting")
+    status, draft = call("POST", "/api/ai/treatment-draft",
+                         {"problem": "Wheat leaf rust", "crop": "wheat", "severity": "high"},
+                         token=TOKENS["agronomist"])
+    check("treatment draft returned", status == 200 and "measures" in (draft or {}), f"{status} {draft}")
+    if status == 200:
+        check("draft includes safety fields",
+              bool(draft.get("ppe")) and bool(draft.get("pre_harvest_interval"))
+              and bool(draft.get("re_entry_interval")))
+        check("draft is marked as drafted", draft.get("drafted") is True)
+    status, denied = call("POST", "/api/ai/treatment-draft",
+                          {"problem": "Wheat leaf rust"}, token=TOKENS.get("farmer"))
+    check("treatment drafting restricted to agronomist roles", status == 403, str(status))
+
+    section("PDF reports")
+    status, cases = call("GET", "/api/cases", token=TOKENS["admin"])
+    if cases:
+        cid = cases[0]["id"]
+        status, pdf = call("GET", f"/api/cases/{cid}/report/pdf", token=TOKENS["admin"], raw=True)
+        head = pdf[:4].decode('latin-1') if isinstance(pdf, (bytes, bytearray)) else str(pdf)[:4]
+        check("PDF report generated", status == 200 and head == "%PDF", f"{status} {head!r}")
+        check("PDF report is non-trivial in size", len(pdf) > 5000, str(len(pdf)))
+        status, jsonrep = call("GET", f"/api/cases/{cid}/report", token=TOKENS["admin"])
+        check("JSON report still available alongside PDF", status == 200 and "report_id" in jsonrep)
 
     print(f"\n\033[1mResult:\033[0m {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
