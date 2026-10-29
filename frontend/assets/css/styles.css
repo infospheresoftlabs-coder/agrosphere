@@ -601,6 +601,10 @@ footer.app-footer {
   color: var(--text); border: 1px solid rgba(255, 255, 255, .5);
 }
 [data-theme="dark"] .auth-signin .auth-card { background: rgba(17, 26, 22, .97); color: var(--text); }
+/* "Sign in to AgroSphere" reads as pure black on the near-white card. In dark
+   mode the card is near-black, so the heading flips to white to stay legible. */
+.auth-signin .auth-card h2 { color: #000; }
+[data-theme="dark"] .auth-signin .auth-card h2 { color: #fff; }
 .auth-signin .auth-card .tabs { background: var(--surface-2); }
 
 .auth-about-tag {
