@@ -12,7 +12,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..constants import ROLE_LABELS, STATE_OWNER, TRANSITIONS, CaseState, Role
+from ..constants import ROLE_LABELS, TRANSITIONS, CaseState, Role, state_roles
 from ..models import (
     AuditEvent,
     Case,
@@ -184,14 +184,14 @@ def transition_case(
             detail=f"Illegal transition {from_state.value} -> {to_state.value}",
         )
 
-    owner = STATE_OWNER.get(to_state)
-    if actor.role != owner.value and not (allow_admin and actor.role == Role.SUPER_ADMIN.value):
+    owner_roles = state_roles(to_state)
+    if actor.role not in {r.value for r in owner_roles} and not (
+        allow_admin and actor.role == Role.SUPER_ADMIN.value
+    ):
+        names = " or ".join(sorted(ROLE_LABELS.get(r, r) for r in owner_roles)) or "an administrator"
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Only {ROLE_LABELS.get(owner, owner)} may move a case to "
-                f"'{to_state.value}'"
-            ),
+            detail=f"Only {names} may move a case to '{to_state.value}'",
         )
 
     case.state = to_state.value

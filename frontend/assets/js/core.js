@@ -63,7 +63,7 @@ export const STRINGS = {
     drone: 'Drone Operations', fleet: 'Drone Fleet', reports: 'Reports',
     payments: 'Payments', notifications: 'Notifications', grievances: 'Support',
     knowledge: 'Knowledge Base', analytics: 'Analytics', modules: 'Platform Modules',
-    admin: 'Administration', audit: 'Audit Trail', settings: 'Settings', advisor: 'AI Advisor',
+    admin: 'Administration', audit: 'Audit Trail', verifications: 'Verifications', settings: 'Settings', advisor: 'AI Advisor',
     map: 'Live Map', capture: 'Live Capture', weather: 'Weather',
     directions: 'Directions', track: 'Live tracking',
 
@@ -79,7 +79,7 @@ export const STRINGS = {
     drone: 'ड्रोन संचालन', fleet: 'ड्रोन बेड़ा', reports: 'रिपोर्ट',
     payments: 'भुगतान', notifications: 'सूचनाएँ', grievances: 'सहायता',
     knowledge: 'ज्ञान आधार', analytics: 'विश्लेषिकी', modules: 'प्लेटफ़ॉर्म मॉड्यूल',
-    admin: 'प्रशासन', audit: 'लेखा परीक्षा', settings: 'सेटिंग्स', advisor: 'एआई सलाहकार',
+    admin: 'प्रशासन', audit: 'लेखा परीक्षा', verifications: 'सत्यापन', settings: 'सेटिंग्स', advisor: 'एआई सलाहकार',
     map: 'लाइव नक्शा', capture: 'लाइव कैप्चर', weather: 'मौसम',
     directions: 'दिशा-निर्देश', track: 'लाइव ट्रैकिंग',
 
@@ -95,7 +95,7 @@ export const STRINGS = {
     drone: 'ड्रोन कामकाज', fleet: 'ड्रोन ताफा', reports: 'अहवाल',
     payments: 'देयके', notifications: 'सूचना', grievances: 'सहाय्य',
     knowledge: 'ज्ञानकोश', analytics: 'विश्लेषण', modules: 'मंच मॉड्यूल',
-    admin: 'प्रशासन', audit: 'लेखापरीक्षण', settings: 'सेटिंग्ज', advisor: 'एआय सल्लागार',
+    admin: 'प्रशासन', audit: 'लेखापरीक्षण', verifications: 'पडताळणी', settings: 'सेटिंग्ज', advisor: 'एआय सल्लागार',
     logout: 'बाहेर पडा', welcome: 'स्वागत', save: 'जतन करा', cancel: 'रद्द',
     submit: 'सबमिट', approve: 'मंजूर', reject: 'नामंजूर', theme: 'थीम',
     light: 'फिकट', dark: 'गडद', system: 'सिस्टम', language: 'भाषा',
@@ -108,7 +108,7 @@ export const STRINGS = {
     drone: 'ட்ரோன் செயல்பாடுகள்', fleet: 'ட்ரோன் குழு', reports: 'அறிக்கைகள்',
     payments: 'கொடுப்பனவுகள்', notifications: 'அறிவிப்புகள்', grievances: 'ஆதரவு',
     knowledge: 'அறிவுத் தளம்', analytics: 'பகுப்பாய்வு', modules: 'தள தொகுதிகள்',
-    admin: 'நிர்வாகம்', audit: 'தணிக்கை', settings: 'அமைப்புகள்',
+    admin: 'நிர்வாகம்', audit: 'தணிக்கை', verifications: 'சரிபார்ப்புகள்', settings: 'அமைப்புகள்',
     logout: 'வெளியேறு', welcome: 'வரவேற்பு', save: 'சேமி', cancel: 'ரத்து',
     submit: 'சமர்ப்பி', approve: 'ஒப்புதல்', reject: 'நிராகரி', theme: 'தீம்',
     light: 'வெளிர்', dark: 'இருள்', system: 'சிஸ்டம்', language: 'மொழி',
@@ -121,7 +121,7 @@ export const STRINGS = {
     drone: 'డ్రోన్ కార్యకలాపాలు', fleet: 'డ్రోన్ సమూహం', reports: 'నివేదికలు',
     payments: 'చెల్లింపులు', notifications: 'నోటిఫికేషన్లు', grievances: 'సహాయం',
     knowledge: 'జ్ఞాన కేంద్రం', analytics: 'విశ్లేషణలు', modules: 'ప్లాట్‌ఫారమ్ మాడ్యూల్స్',
-    admin: 'నిర్వహణ', audit: 'ఆడిట్', settings: 'సెట్టింగ్‌లు',
+    admin: 'నిర్వహణ', audit: 'ఆడిట్', verifications: 'ధృవీకరణలు', settings: 'సెట్టింగ్‌లు',
     logout: 'సైన్ అవుట్', welcome: 'స్వాగతం', save: 'సేవ్', cancel: 'రద్దు',
     submit: 'సమర్పించు', approve: 'ఆమోదించు', reject: 'తిరస్కరించు', theme: 'థీమ్',
     light: 'లైట్', dark: 'డార్క్', system: 'సిస్టమ్', language: 'భాష',
@@ -134,7 +134,7 @@ export const STRINGS = {
     drone: 'ড্রোন পরিচালনা', fleet: 'ড্রোন বহর', reports: 'প্রতিবেদন',
     payments: 'পেমেন্ট', notifications: 'বিজ্ঞপ্তি', grievances: 'সহায়তা',
     knowledge: 'জ্ঞানভাণ্ডার', analytics: 'বিশ্লেষণ', modules: 'মডিউল',
-    admin: 'প্রশাসন', audit: 'অডিট', settings: 'সেটিংস',
+    admin: 'প্রশাসন', audit: 'অডিট', verifications: 'যাচাইকরণ', settings: 'সেটিংস',
     logout: 'সাইন আউট', welcome: 'স্বাগতম', save: 'সংরক্ষণ', cancel: 'বাতিল',
     submit: 'জমা', approve: 'অনুমোদন', reject: 'প্রত্যাখ্যান', theme: 'থিম',
     light: 'হালকা', dark: 'গাঢ়', system: 'সিস্টেম', language: 'ভাষা',
@@ -147,7 +147,7 @@ export const STRINGS = {
     drone: 'ડ્રોન કામગીરી', fleet: 'ડ્રોન કાફલો', reports: 'અહેવાલ',
     payments: 'ચુકવણી', notifications: 'સૂચનાઓ', grievances: 'સહાય',
     knowledge: 'જ્ઞાન આધાર', analytics: 'વિશ્લેષણ', modules: 'મોડ્યુલ',
-    admin: 'વહીવટ', audit: 'ઓડિટ', settings: 'સેટિંગ્સ',
+    admin: 'વહીવટ', audit: 'ઓડિટ', verifications: 'ચકાસણી', settings: 'સેટિંગ્સ',
     logout: 'સાઇન આઉટ', welcome: 'સ્વાગત', save: 'સાચવો', cancel: 'રદ',
     submit: 'સબમિટ', approve: 'મંજૂર', reject: 'નામંજૂર', theme: 'થીમ',
     light: 'હળવું', dark: 'ઘેરું', system: 'સિસ્ટમ', language: 'ભાષા',
@@ -160,7 +160,7 @@ export const STRINGS = {
     drone: 'ಡ್ರೋನ್ ಕಾರ್ಯಾಚರಣೆ', fleet: 'ಡ್ರೋನ್ ಪಡೆ', reports: 'ವರದಿಗಳು',
     payments: 'ಪಾವತಿಗಳು', notifications: 'ಅಧಿಸೂಚನೆಗಳು', grievances: 'ಸಹಾಯ',
     knowledge: 'ಜ್ಞಾನ ಆಧಾರ', analytics: 'ವಿಶ್ಲೇಷಣೆ', modules: 'ಮಾಡ್ಯೂಲ್‌ಗಳು',
-    admin: 'ಆಡಳಿತ', audit: 'ಲೆಕ್ಕಪರಿಶೋಧನೆ', settings: 'ಸೆಟ್ಟಿಂಗ್‌ಗಳು',
+    admin: 'ಆಡಳಿತ', audit: 'ಲೆಕ್ಕಪರಿಶೋಧನೆ', verifications: 'ಪರಿಶೀಲನೆಗಳು', settings: 'ಸೆಟ್ಟಿಂಗ್‌ಗಳು',
     map: 'ಲೈವ್ ನಕ್ಷೆ', capture: 'ಲೈವ್ ಕ್ಯಾಪ್ಚರ್', weather: 'ಹವಾಮಾನ',
     directions: 'ದಿಕ್ಕುಗಳು', track: 'ಲೈವ್ ಟ್ರ್ಯಾಕಿಂಗ್', advisor: 'AI ಸಲಹೆಗಾರ',
     logout: 'ಸೈನ್ ಔಟ್', welcome: 'ಸ್ವಾಗತ', save: 'ಉಳಿಸಿ', cancel: 'ರದ್ದು',
@@ -175,7 +175,7 @@ export const STRINGS = {
     drone: 'ਡਰੋਨ ਕਾਰਵਾਈ', fleet: 'ਡਰੋਨ ਫਲੀਟ', reports: 'ਰਿਪੋਰਟਾਂ',
     payments: 'ਭੁਗਤਾਨ', notifications: 'ਸੂਚਨਾਵਾਂ', grievances: 'ਸਹਾਇਤਾ',
     knowledge: 'ਗਿਆਨ ਅਧਾਰ', analytics: 'ਵਿਸ਼ਲੇਸ਼ਣ', modules: 'ਮੋਡਿਊਲ',
-    admin: 'ਪ੍ਰਸ਼ਾਸਨ', audit: 'ਆਡਿਟ', settings: 'ਸੈਟਿੰਗਾਂ',
+    admin: 'ਪ੍ਰਸ਼ਾਸਨ', audit: 'ਆਡਿਟ', verifications: 'ਤਸਦੀਕ', settings: 'ਸੈਟਿੰਗਾਂ',
     map: 'ਲਾਈਵ ਨਕਸ਼ਾ', capture: 'ਲਾਈਵ ਕੈਪਚਰ', weather: 'ਮੌਸਮ',
     directions: 'ਦਿਸ਼ਾਵਾਂ', track: 'ਲਾਈਵ ਟਰੈਕਿੰਗ', advisor: 'AI ਸਲਾਹਕਾਰ',
     logout: 'ਸਾਈਨ ਆਊਟ', welcome: 'ਜੀ ਆਇਆਂ', save: 'ਸੰਭਾਲੋ', cancel: 'ਰੱਦ',
@@ -187,9 +187,19 @@ export const STRINGS = {
 };
 
 let currentLang = localStorage.getItem('agrosphere.lang') || 'en';
+let langListener = null;
+// The shell subscribes here so that changing the language re-renders every
+// mounted screen, not just the control that changed it.
+export function onLanguageChange(fn) { langListener = fn; }
+export function currentLangCode() { return currentLang; }
 export function setLang(code) {
   currentLang = code;
   localStorage.setItem('agrosphere.lang', code);
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = code;
+    document.documentElement.dataset.lang = code;
+  }
+  if (langListener) langListener(code);
 }
 export function t(key) {
   const dict = STRINGS[currentLang] || STRINGS.en;

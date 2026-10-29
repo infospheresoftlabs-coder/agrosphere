@@ -390,6 +390,140 @@ def main() -> int:
         status, jsonrep = call("GET", f"/api/cases/{cid}/report", token=TOKENS["admin"])
         check("JSON report still available alongside PDF", status == 200 and "report_id" in jsonrep)
 
+    section("Profile: mobile number for SMS and WhatsApp")
+    status, prof = call("PATCH", "/api/auth/me", {"phone": "9876543210"}, token=TOKENS["admin"])
+    check("admin can add a mobile number", status == 200 and prof.get("phone") == "+919876543210", str(status))
+    status, prof = call("PATCH", "/api/auth/me", {"phone": "+91 91234 56789"}, token=TOKENS["admin"])
+    check("international format is normalised", status == 200 and prof.get("phone") == "+919123456789", str(prof))
+    status, bad = call("PATCH", "/api/auth/me", {"phone": "not-a-number"}, token=TOKENS["admin"])
+    check("invalid number rejected", status == 422, str(status))
+    status, st = call("GET", "/api/messaging/status", token=TOKENS["admin"])
+    check("messaging status reports the caller's number", status == 200 and st.get("phone_ready") is True, str(status))
+    status, msg = call("POST", "/api/messaging/send",
+                       {"channel": "whatsapp", "body": "AgroSphere test message"}, token=TOKENS["admin"])
+    check("message send is honest about delivery", status == 200 and "delivered" in msg, str(msg))
+    status, st = call("GET", "/api/messaging/status", token=TOKENS["farmer"])
+    check("messaging status available to every role", status == 200, str(status))
+
+    section("Verification queue (super admin and farm manager)")
+    status, vq = call("GET", "/api/admin/verifications", token=TOKENS["admin"])
+    check("verification queue reachable by super admin", status == 200 and "users" in vq, str(status))
+    status, vq = call("GET", "/api/admin/verifications", token=TOKENS["manager"])
+    check("verification queue reachable by farm manager", status == 200, str(status))
+    status, denied = call("GET", "/api/admin/verifications", token=TOKENS["farmer"])
+    check("verification queue denied to farmers", status == 403, str(status))
+
+    section("Destructive operations (super admin only)")
+    status, farm = call("POST", "/api/farms", {
+        "name": "Cascade Delete Farm", "district": "Pune", "state": "Maharashtra",
+        "latitude": 18.52, "longitude": 73.85}, token=TOKENS["admin"])
+    check("throwaway farm created for deletion", status == 201 and "id" in farm, str(status))
+    fid = farm["id"]
+    ring = {"type": "Polygon", "coordinates": [
+        [[73.85, 18.52], [73.86, 18.52], [73.86, 18.53], [73.85, 18.53], [73.85, 18.52]]]}
+    status, fld = call("POST", f"/api/farms/{fid}/fields",
+                       {"name": "Cascade Field", "crop": "wheat", "boundary": ring}, token=TOKENS["admin"])
+    check("field created under throwaway farm", status == 201, str(status))
+    status, case = call("POST", "/api/cases", {
+        "field_id": fld["id"], "title": "Cascade case", "observations": "yellow", "severity": "low"},
+        token=TOKENS["admin"])
+    check("case created under throwaway field", status == 201, str(status))
+    status, denied = call("DELETE", f"/api/farms/{fid}", token=TOKENS["farmer"])
+    check("farm deletion denied to farmers", status == 403, str(status))
+    status, res = call("DELETE", f"/api/farms/{fid}", token=TOKENS["admin"])
+    check("farm cascade-deleted by super admin",
+          status == 200 and res.get("removed", {}).get("cases", 0) >= 1, str(res))
+    status, gone = call("GET", f"/api/farms/{fid}", token=TOKENS["admin"])
+    check("deleted farm is gone", status in (404, 405), str(status))
+    status, denied = call("POST", "/api/admin/purge", token=TOKENS["farmer"])
+    check("purge denied to farmers", status == 403, str(status))
+    status, guarded = call("POST", "/api/admin/purge", token=TOKENS["admin"])
+    check("purge requires explicit confirmation", status == 400, str(status))
+
+    section("Account deletion with guards")
+    import time as _time
+    email = f"del-{int(_time.time())}@example.com"
+    status, reg = call("POST", "/api/auth/register", {
+        "email": email, "full_name": "Delete Target", "password": "ProbePass123", "role": "farmer"})
+    check("throwaway account registered", status == 201, str(status))
+    uid = reg["user"]["id"]
+    status, plan = call("GET", f"/api/admin/deletion-plan/{uid}", token=TOKENS["admin"])
+    check("deletion plan previews the footprint", status == 200 and "owned_total" in plan, str(status))
+    status, denied = call("DELETE", f"/api/admin/users/{uid}", token=TOKENS["farmer"])
+    check("account deletion denied to farmers", status == 403, str(status))
+    status, res = call("DELETE", f"/api/admin/users/{uid}", token=TOKENS["admin"])
+    check("account deleted by super admin", status == 200 and res.get("deleted") is True, str(res))
+    status, me = call("GET", "/api/auth/me", token=TOKENS["admin"])
+    status, res = call("DELETE", f"/api/admin/users/{me['id']}", token=TOKENS["admin"])
+    check("administrator cannot delete their own account", status == 409, str(status))
+
+    section("Every operational role can carry its own workflow")
+    # A shared early step: whoever is in the field — farmer, farm manager,
+    # agronomist or drone operator — may capture imagery and run the analysis.
+    ring2 = {"type": "Polygon", "coordinates": [
+        [[73.87, 18.54], [73.88, 18.54], [73.88, 18.55], [73.87, 18.55], [73.87, 18.54]]]}
+    status, farm2 = call("POST", "/api/farms", {
+        "name": "Role Coverage Farm", "district": "Pune", "state": "Maharashtra",
+        "latitude": 18.54, "longitude": 73.87}, token=TOKENS["manager"])
+    check("farm manager can register a farm", status == 201, str(status))
+    status, fld2 = call("POST", f"/api/farms/{farm2['id']}/fields",
+                        {"name": "Role Field", "crop": "rice", "boundary": ring2}, token=TOKENS["manager"])
+    check("farm manager can add a field", status == 201, str(status))
+
+    for role in ("manager", "agronomist", "operator"):
+        status, case = call("POST", "/api/cases", {
+            "field_id": fld2["id"], "title": f"{role} capture case",
+            "observations": "grey centred lesions", "severity": "medium"}, token=TOKENS[role])
+        check(f"{role} can open a case", status == 201, str(status))
+        cid = case["id"]
+        status, case = call("POST", f"/api/cases/{cid}/capture", token=TOKENS[role])
+        check(f"{role} can capture imagery", status == 200 and case.get("state") == "imagery_captured", str(status))
+        status, res = call("POST", f"/api/cases/{cid}/analyze", token=TOKENS[role])
+        check(f"{role} can run the AI analysis", status == 200, str(status))
+        status, case = call("POST", f"/api/cases/{cid}/submit", token=TOKENS[role])
+        check(f"{role} can submit for agronomist review", status == 200, str(status))
+
+    # Close/reopen is now open to farmer, farm manager, agronomist and drone
+    # operator, so a manager can complete the loop without waiting on the farmer.
+    # Drive the operator's case to 'completed' first, handing off between roles.
+    status, users = call("GET", "/api/admin/users", token=TOKENS["admin"])
+    operator_id = next(u["id"] for u in users if u["role"] == "drone_operator")
+    status, drones = call("GET", "/api/drones", token=TOKENS["admin"])
+    device_id = next(d["id"] for d in drones if d["availability"] == "available")
+
+    status, _ = call("POST", f"/api/cases/{cid}/review", {"decision": "confirm"}, token=TOKENS["agronomist"])
+    check("agronomist confirms the operator's findings", status == 200, str(status))
+    status, case = call("POST", f"/api/cases/{cid}/plan", {
+        "problem": "Rice blast", "product": "Mancozeb 75% WP", "dosage": "2.5 g/L",
+        "ppe": "Gloves, N95 mask", "pre_harvest_interval": "7 days",
+        "follow_up": "Re-inspect after 7 days"}, token=TOKENS["agronomist"])
+    check("agronomist prepares the plan", status == 200 and case.get("state") == "awaiting_manager", str(status))
+    status, case = call("POST", f"/api/cases/{cid}/costing", {
+        "lines": [{"label": "Product", "qty": 2, "unit": "L", "rate": 780}],
+        "tax_pct": 18, "decision": "approved"}, token=TOKENS["manager"])
+    check("farm manager approves costing", status == 200 and case.get("state") == "awaiting_farmer", str(status))
+    status, case = call("POST", f"/api/cases/{cid}/choose-implementation", {"choice": "drone"}, token=TOKENS["farmer"])
+    check("farmer chooses implementation", status == 200 and case.get("state") == "implementation_chosen", str(status))
+    status, case = call("POST", f"/api/cases/{cid}/assign", {
+        "operator_id": operator_id, "device_id": device_id}, token=TOKENS["manager"])
+    check("farm manager assigns the operator", status == 200 and case.get("state") == "job_assigned", str(status))
+    job_id = case["job"]["id"]
+    call("POST", f"/api/jobs/{job_id}/start", token=TOKENS["operator"])
+    status, case = call("POST", f"/api/jobs/{job_id}/complete",
+                        {"treated_acres": 1.5, "product_used_liters": 3.0}, token=TOKENS["operator"])
+    check("operator completes the mission", status == 200 and case.get("state") == "completed", str(status))
+
+    status, case = call("POST", f"/api/cases/{cid}/close?outcome=Role+coverage",
+                        token=TOKENS["manager"])
+    check("farm manager can close a case", status == 200 and case.get("state") == "closed", str(status))
+    status, case = call("POST", f"/api/cases/{cid}/reopen", token=TOKENS["manager"])
+    check("farm manager can reopen a case", status == 200 and case.get("state") == "reopened", str(status))
+
+    status, denied = call("POST", f"/api/cases/{cid}/costing",
+                          {"lines": [{"label": "X", "qty": 1, "unit": "u", "rate": 10}], "decision": "approved"},
+                          token=TOKENS["farmer"])
+    check("costing approval stays with farm manager", status == 403, str(status))
+
     print(f"\n\033[1mResult:\033[0m {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

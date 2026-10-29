@@ -86,7 +86,36 @@ TRANSITIONS: dict[CaseState, set[CaseState]] = {
     CaseState.REJECTED: set(),
 }
 
-# Which role owns the action that moves a case *into* a given state.
+# Which roles may perform the action that moves a case *into* a given state.
+#
+# A state lists every role that legitimately performs that step, so each role can
+# carry its part of the workflow to completion. Where a step is shared — a farm
+# manager may run the same capture or analysis a farmer would, an agronomist may
+# confirm their own plan while the farm manager also approves it — both roles are
+# named, rather than forcing a hand-off to a single role. The super administrator
+# is always permitted (see ``transition_case``).
+STATE_OWNERS: dict[CaseState, set[Role]] = {
+    CaseState.IMAGERY_CAPTURED: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.ANALYSIS_RUNNING: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.AI_FINDINGS_READY: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.AWAITING_AGRONOMIST: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.PLAN_PREPARED: {Role.AGRONOMIST},
+    CaseState.AWAITING_MANAGER: {Role.AGRONOMIST},
+    CaseState.PLAN_APPROVED: {Role.FARM_MANAGER},
+    CaseState.AWAITING_FARMER: {Role.FARM_MANAGER},
+    CaseState.IMPLEMENTATION_CHOSEN: {Role.FARMER, Role.FARM_MANAGER},
+    CaseState.JOB_ASSIGNED: {Role.FARM_MANAGER},
+    CaseState.IN_PROGRESS: {Role.DRONE_OPERATOR, Role.FARMER, Role.FARM_MANAGER},
+    CaseState.COMPLETED: {Role.DRONE_OPERATOR, Role.FARMER, Role.FARM_MANAGER},
+    CaseState.FOLLOW_UP: {Role.AGRONOMIST, Role.FARMER, Role.FARM_MANAGER},
+    CaseState.CLOSED: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.REOPENED: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR},
+    CaseState.NEEDS_REVISION: {Role.AGRONOMIST},
+    CaseState.REJECTED: {Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST},
+}
+
+# The single role shown as the "owner" of a state in the interface, for the
+# primary actor of that step. Kept for the /api/meta contract.
 STATE_OWNER: dict[CaseState, Role] = {
     CaseState.IMAGERY_CAPTURED: Role.FARMER,
     CaseState.ANALYSIS_RUNNING: Role.FARMER,
@@ -106,6 +135,11 @@ STATE_OWNER: dict[CaseState, Role] = {
     CaseState.NEEDS_REVISION: Role.AGRONOMIST,
     CaseState.REJECTED: Role.SUPER_ADMIN,
 }
+
+
+def state_roles(state: CaseState) -> set[Role]:
+    """Roles permitted to move a case into ``state`` (super admin aside)."""
+    return STATE_OWNERS.get(state, {Role.SUPER_ADMIN})
 
 
 # 22 Scheduled Indian Languages + English.

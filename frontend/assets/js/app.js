@@ -1,6 +1,7 @@
 /* AgroSphere — application shell, routing and views. */
 import {
-  API, api, setSession, img, t, setLang, applyTheme, currentTheme, toast,
+  API, api, setSession, img, t, setLang, onLanguageChange, currentLangCode,
+  applyTheme, currentTheme, toast,
   el, esc, inr, pct, fmtDate, titleCase, STATE_TONE, SEV_TONE, chip,
   statCard, moduleHero, emptyState, modal, field, input, select, bar, bindForm,
 } from './core.js';
@@ -41,6 +42,7 @@ const ROUTES = {
   advisor: { label: 'advisor', icon: '✦', roles: null, render: viewAdvisor },
   analytics: { label: 'analytics', icon: '📈', roles: null, render: viewAnalytics },
   admin: { label: 'admin', icon: '⚙', roles: ['super_admin'], render: viewAdmin },
+  verifications: { label: 'verifications', icon: '☑', roles: ['super_admin', 'farm_manager'], render: viewVerifications },
   audit: { label: 'audit', icon: '🔒', roles: ['super_admin'], render: viewAudit },
   settings: { label: 'settings', icon: '⚑', roles: null, render: viewSettings },
 };
@@ -80,14 +82,28 @@ window.addEventListener('hashchange', () => {
 });
 
 /* --------------------------------------------------------------- bootstrap */
+// Applies the chosen language to the document element so browsers pick the right
+// font stack and assistive technology announces the correct language.
+function applyDocumentLang() {
+  const code = ME?.language || (localStorage.getItem('agrosphere.lang') || 'en');
+  document.documentElement.lang = code;
+  document.documentElement.dataset.lang = code;
+}
+
 async function boot() {
   applyTheme(currentTheme());
+  applyDocumentLang();
   try {
     META = await api('/meta');
   } catch (e) { console.error(e); }
   if (API.token) {
     try { ME = await api('/auth/me'); } catch { setSession(null, null); ME = null; }
   }
+  // Adopt the account's saved language before the first paint so every screen
+  // opens in the language the user last chose.
+  if (ME?.language) setLang(ME.language);
+  // A language change from any screen re-renders the whole app.
+  onLanguageChange(() => { applyDocumentLang(); if (ME) render(); });
   ctx.setSession(ME, META);
   render();
 }
@@ -97,31 +113,13 @@ function viewAuth() {
   app.replaceChildren();
   const wrap = el('div', { class: 'auth-wrap' });
 
-  const hero = el('div', { class: 'auth-hero' },
-    el('img', { class: 'bg', src: img('hero'), alt: 'AgroSphere farm landscape' }),
-    el('div', { class: 'brandline' },
-      el('img', { src: img('logo_mark'), alt: 'AgroSphere logo' }),
-      el('div', {}, el('strong', {}, 'AgroSphere'), el('span', {}, 'Agriculture intelligence')),
-    ),
-    el('div', {},
-      el('h1', {}, 'Crop-health intelligence for every Indian farm.'),
-      el('p', { class: 'lead' }, 'A secure, multilingual, AI-powered platform connecting farmers, agronomists, farm managers and drone operators — from field capture to verified treatment.'),
-      el('div', { class: 'pills' },
-        el('span', {}, '5 enforced roles'),
-        el('span', {}, '22 Indian languages'),
-        el('span', {}, 'Verified ICAR sources'),
-        el('span', {}, 'Drone simulator'),
-        el('span', {}, 'Light & dark themes'),
-      ),
-    ),
-  );
-
   const card = el('div', { class: 'auth-card' });
   let mode = RESET_TOKEN ? 'reset' : 'login';
 
   const email = input('email', { type: 'email', placeholder: 'you@example.com', autocomplete: 'username' });
   const password = input('password', { type: 'password', placeholder: '••••••••', autocomplete: 'current-password' });
   const fullname = input('full_name', { placeholder: 'Your full name' });
+  const phone = input('phone', { type: 'tel', placeholder: 'Mobile number (for SMS / WhatsApp)', autocomplete: 'tel' });
   const newPassword = input('new_password', { type: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' });
   const confirmPassword = input('confirm_password', { type: 'password', placeholder: 'Repeat new password', autocomplete: 'new-password' });
   const roleSel = select('role', (META?.signup_roles || []).map(r => ({ value: r.key, label: r.label })));
@@ -151,6 +149,7 @@ function viewAuth() {
       form.appendChild(field('Email', email));
       form.appendChild(field('Password', password));
       form.appendChild(field('Full name', fullname));
+      form.appendChild(field('Mobile number', phone, 'Optional. Used for SMS and WhatsApp updates. Include the country code for non-Indian numbers.'));
       form.appendChild(field('Role', roleSel, 'Role permissions are enforced on the server.'));
       form.appendChild(field('Preferred language', langSel));
     } else if (mode === 'forgot') {
@@ -174,15 +173,17 @@ function viewAuth() {
         if (mode === 'login') {
           const res = await api('/auth/login', { method: 'POST', body: { email: email.value, password: password.value } });
           setSession(res.token, res.user); ME = res.user; ctx.setSession(ME, META);
-          if (res.user.language) setLang(res.user.language);
+          if (res.user.language) { setLang(res.user.language); applyDocumentLang(); }
           toast(`Welcome, ${res.user.full_name}`);
           render();
         } else if (mode === 'register') {
           const res = await api('/auth/register', { method: 'POST', body: {
             email: email.value, password: password.value, full_name: fullname.value,
+            phone: phone.value || null,
             role: roleSel.value, language: langSel.value } });
           setSession(res.token, res.user); ME = res.user; ctx.setSession(ME, META);
-          if (res.user.language) setLang(res.user.language);
+          setLang(res.user.language || langSel.value);
+          applyDocumentLang();
           toast(`Welcome, ${res.user.full_name}`);
           render();
         } else if (mode === 'forgot') {
@@ -216,17 +217,16 @@ function viewAuth() {
   }
   drawCard();
   const panel = el('div', { class: 'auth-panel' },
-    el('div', { class: 'auth-stack' }, aboutModule(), card),
+    el('div', { class: 'auth-stack' }, aboutModule(card)),
   );
-  wrap.append(hero, panel);
+  wrap.append(panel);
   app.appendChild(wrap);
 }
 
 /* ------------------------------------------------------------- about module */
-/* Sits above the sign-in card on the home screen: what AgroSphere is, over a
- * generated image of a drone over a Punjab wheat field, blurred so the copy
- * stays readable. */
-function aboutModule() {
+/* The home screen: a full-bleed generated image with the sign-in module sitting
+ * inside it, above the AgroSphere app description. */
+function aboutModule(card) {
   const features = [
     ['🛰', 'Drone operations', 'Mission planning, pre-flight checks and a clearly-labelled simulator.'],
     ['🧠', 'AI crop health', 'Camera and drone frames assessed in seconds, in your own language.'],
@@ -240,6 +240,11 @@ function aboutModule() {
       el('img', { src: img('signin_hero'), alt: 'Agricultural drone over a Punjab wheat field', loading: 'eager' }),
     ),
     el('div', { class: 'auth-about-body' },
+      el('div', { class: 'auth-brandline' },
+        el('img', { src: img('logo_mark'), alt: 'AgroSphere logo' }),
+        el('div', {}, el('strong', {}, 'AgroSphere'), el('span', {}, 'Agriculture intelligence')),
+      ),
+      el('div', { class: 'auth-signin' }, card),
       el('span', { class: 'auth-about-tag' }, '✦ AI-powered agriculture platform'),
       el('h2', {}, 'From field capture to verified treatment'),
       el('p', { class: 'auth-about-lead' },
@@ -276,7 +281,7 @@ function buildSidebar() {
     ['Operations', ['farms', 'cases', 'capture', 'reports']],
     ['Field services', ['drone', 'fleet', 'weather', 'payments']],
     ['Engagement', ['notifications', 'grievances', 'knowledge', 'advisor']],
-    ['Governance', ['admin', 'audit', 'settings']],
+    ['Governance', ['verifications', 'admin', 'audit', 'settings']],
   ];
   for (const [label, keys] of groups) {
     const visible = keys.filter(k => allowed(k));
@@ -313,6 +318,18 @@ function buildMain() {
   top.appendChild(el('button', { class: 'icon-btn menu-btn', onclick: () => document.querySelector('.sidebar').classList.toggle('open'), 'aria-label': 'Menu' }, '☰'));
   const head = el('div', { class: 'grow' }, el('h3', {}, t(ROUTES[route]?.label || 'dashboard')));
   top.appendChild(head);
+  // Systemwide language switcher: available on every screen, applies instantly.
+  const langPicker = select('language', (META?.languages || []).map(l => ({
+    value: l.code, label: l.native, selected: l.code === currentLangCode(),
+  })), { class: 'lang-picker', 'aria-label': 'Language' });
+  langPicker.addEventListener('change', () => {
+    const code = langPicker.value;
+    setLang(code);
+    if (ME) api('/auth/me', { method: 'PATCH', body: { language: code } }).catch(() => {});
+    render();
+    toast(`Language: ${langPicker.options[langPicker.selectedIndex].text}`);
+  });
+  top.appendChild(langPicker);
   top.appendChild(el('button', { class: 'icon-btn', title: 'Toggle theme', onclick: toggleTheme }, themeIcon()));
   top.appendChild(el('button', { class: 'icon-btn', title: 'Notifications', onclick: () => navigate('notifications') }, '🔔'));
   top.appendChild(el('img', { src: img(ME.avatar_image), alt: ME.full_name, style: 'width:38px;height:38px;border-radius:10px;object-fit:cover' }));
@@ -854,9 +871,12 @@ function caseActions(c, reload) {
     catch (e) { toast(e.message, 'error'); }
   };
 
-  if (is('farmer') && c.state === 'draft') out.push(act('Capture imagery', '', post(`/cases/${c.id}/capture`, undefined, 'Imagery captured')));
-  if (is('farmer') && c.state === 'imagery_captured') out.push(act('Run AI analysis', '', post(`/cases/${c.id}/analyze`, undefined, 'Analysis complete')));
-  if (is('farmer') && c.state === 'ai_findings_ready') out.push(act('Submit for agronomist review', '', post(`/cases/${c.id}/submit`, undefined, 'Submitted')));
+  // Whoever is in the field — farmer, farm manager, agronomist or drone
+  // operator — may run the shared early steps (capture, analyse, submit).
+  const FIELD_ROLES = ['farmer', 'farm_manager', 'agronomist', 'drone_operator'];
+  if (is(...FIELD_ROLES) && c.state === 'draft') out.push(act('Capture imagery', '', post(`/cases/${c.id}/capture`, undefined, 'Imagery captured')));
+  if (is(...FIELD_ROLES) && c.state === 'imagery_captured') out.push(act('Run AI analysis', '', post(`/cases/${c.id}/analyze`, undefined, 'Analysis complete')));
+  if (is(...FIELD_ROLES) && c.state === 'ai_findings_ready') out.push(act('Submit for agronomist review', '', post(`/cases/${c.id}/submit`, undefined, 'Submitted')));
   if (is('agronomist') && ['awaiting_agronomist', 'reopened'].includes(c.state)) {
     out.push(act('Confirm findings', '', post(`/cases/${c.id}/review`, { decision: 'confirm', notes: 'Confirmed from field imagery.' }, 'Findings confirmed')));
     out.push(act('Reject case', 'danger', post(`/cases/${c.id}/review`, { decision: 'reject', notes: 'Insufficient evidence.' }, 'Case rejected')));
@@ -877,16 +897,16 @@ function caseActions(c, reload) {
     if (c.state === 'job_assigned') out.push(act('Start mission', '', post(`/jobs/${c.job.id}/start`, undefined, 'Mission started (simulated)')));
     if (c.state === 'in_progress') out.push(act('Complete mission', '', post(`/jobs/${c.job.id}/complete`, {}, 'Mission completed (simulated)')));
   }
-  if (['completed', 'in_progress'].includes(c.state) && is('farmer', 'agronomist')) {
+  if (['completed', 'in_progress'].includes(c.state) && is(...FIELD_ROLES)) {
     out.push(act('Schedule follow-up', 'ghost', post(`/cases/${c.id}/follow-up`, undefined, 'Follow-up scheduled')));
   }
-  if (['completed', 'follow_up'].includes(c.state) && is('farmer')) {
+  if (['completed', 'follow_up'].includes(c.state) && is(...FIELD_ROLES)) {
     out.push(act('Close case', '', async () => {
       try { await api(`/cases/${c.id}/close?outcome=Outcome+recorded`, { method: 'POST' }); toast('Case closed'); reload(); }
       catch (e) { toast(e.message, 'error'); }
     }));
   }
-  if (['closed', 'rejected'].includes(c.state) && is('farmer')) {
+  if (['closed', 'rejected'].includes(c.state) && is(...FIELD_ROLES)) {
     out.push(act('Reopen case', 'ghost', post(`/cases/${c.id}/reopen`, undefined, 'Case reopened')));
   }
   out.push(act('View report', 'ghost', () => reportModal(c.id)));
@@ -1416,6 +1436,90 @@ function chartCard(title, data, tone) {
 }
 
 /* --------------------------------------------------------------- admin */
+async function viewVerifications(root) {
+  root.appendChild(moduleHero({
+    image: 'module_approval', tag: 'Quality assurance',
+    title: t('verifications'),
+    body: 'Review and verify unverified accounts, drones and captured imagery. Available to super administrators and farm managers.',
+  }));
+  let data = { users: [], drones: [], media: [] };
+  try { data = await api('/admin/verifications'); } catch (e) { toast(e.message, 'error'); }
+  const refresh = () => viewVerifications(root.replaceChildren() || root);
+
+  const grid = el('div', { class: 'grid c3' });
+  grid.append(
+    statCard('Accounts', data.users.length, 'Awaiting verification', data.users.length ? 'gold' : 'green'),
+    statCard('Drones', data.drones.length, 'Unverified devices', data.drones.length ? 'gold' : 'green'),
+    statCard('Captures', data.media.length, 'Recent field imagery'),
+  );
+  root.appendChild(grid);
+
+  // Accounts
+  const uc = el('div', { class: 'card pad-0', style: 'margin-top:18px' });
+  uc.appendChild(el('div', { class: 'card-head', style: 'padding:20px 20px 0' }, el('h3', { class: 'grow' }, 'Unverified accounts')));
+  if (!data.users.length) {
+    uc.appendChild(el('div', { style: 'padding:0 20px 20px' }, emptyState('role_farmer', 'All accounts verified', 'New registrations appear here until they are reviewed.')));
+  } else {
+    const tbl = el('table', { class: 'table' });
+    tbl.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Name'), el('th', {}, 'Role'), el('th', {}, 'Status'), el('th', {}, 'Actions'))));
+    const tb = el('tbody');
+    for (const u of data.users) {
+      tb.appendChild(el('tr', { style: 'cursor:default' },
+        el('td', {}, el('div', { style: 'display:flex;gap:8px;align-items:center' },
+          el('img', { src: img(u.avatar_image), style: 'width:30px;height:30px;border-radius:8px;object-fit:cover' }),
+          el('div', {}, el('b', { style: 'font-size:.85rem' }, u.full_name),
+            el('div', { style: 'font-size:.74rem;color:var(--text-3)' }, u.email)))),
+        el('td', {}, chip(titleCase(u.role), 'blue')),
+        el('td', {}, chip(titleCase(u.verification_status), 'gold')),
+        el('td', {}, el('div', { style: 'display:flex;gap:6px' },
+          el('button', { class: 'btn sm', onclick: () => decide('user', u.id, 'verified') }, 'Verify'),
+          el('button', { class: 'btn ghost sm', onclick: () => decide('user', u.id, 'rejected') }, 'Reject'))),
+      ));
+    }
+    tbl.appendChild(tb); uc.appendChild(tbl);
+  }
+  root.appendChild(uc);
+
+  // Drones + media
+  const cols = el('div', { class: 'grid c2', style: 'margin-top:18px' });
+  const dc = el('div', { class: 'card' });
+  dc.appendChild(el('div', { class: 'card-head' }, el('h3', { class: 'grow' }, 'Unverified drones')));
+  if (!data.drones.length) dc.appendChild(el('p', { style: 'color:var(--text-3)' }, 'No drones are awaiting verification.'));
+  for (const d of data.drones) {
+    dc.appendChild(el('div', { style: 'display:flex;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)' },
+      el('div', { class: 'grow' }, el('b', {}, d.model), el('div', { style: 'font-size:.8rem;color:var(--text-3)' }, `Serial ${d.serial}`)),
+      el('button', { class: 'btn sm', onclick: () => decide('drone', d.id, true) }, 'Verify'),
+      el('button', { class: 'btn ghost sm', onclick: () => decide('drone', d.id, false) }, 'Reject')));
+  }
+  cols.appendChild(dc);
+
+  const mc = el('div', { class: 'card' });
+  mc.appendChild(el('div', { class: 'card-head' }, el('h3', { class: 'grow' }, 'Captured imagery')));
+  if (!data.media.length) mc.appendChild(el('p', { style: 'color:var(--text-3)' }, 'No captures are awaiting review.'));
+  const mgrid = el('div', { class: 'media-grid' });
+  for (const m of data.media.slice(0, 12)) {
+    mgrid.appendChild(el('div', { class: 'media-cell' },
+      el('img', { src: m.url || img('module_crop_health'), alt: m.filename, style: 'width:100%;height:110px;object-fit:cover;border-radius:10px' }),
+      el('div', { style: 'display:flex;gap:6px;margin-top:6px' },
+        el('button', { class: 'btn sm', onclick: () => decide('media', m.id, 'verified') }, 'Verify'),
+        el('button', { class: 'btn ghost sm', onclick: () => decide('media', m.id, 'rejected') }, 'Reject')),
+    ));
+  }
+  mc.appendChild(mgrid);
+  cols.appendChild(mc);
+  root.appendChild(cols);
+
+  async function decide(kind, id, decision) {
+    try {
+      if (kind === 'user') await api(`/admin/users/${id}/verify?decision=${decision}`, { method: 'POST' });
+      else if (kind === 'drone') await api(`/drones/${id}/verify?decision=${decision === true || decision === 'true'}`, { method: 'POST' });
+      else await api(`/media/${id}/verify?decision=${decision}`, { method: 'POST' });
+      toast('Decision recorded');
+      refresh();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+}
+
 async function viewAdmin(root) {
   root.appendChild(moduleHero({
     image: 'module_security', tag: 'Governance',
@@ -1464,6 +1568,7 @@ async function viewAdmin(root) {
           try { await api(`/admin/users/${u.id}/revoke-sessions`, { method: 'POST' }); toast('Sessions revoked'); }
           catch (e) { toast(e.message, 'error'); }
         } }, 'Revoke sessions') : null,
+        !isSelf ? el('button', { class: 'btn danger sm', onclick: () => deleteUserModal(u, () => viewAdmin(root.replaceChildren() || root)) }, 'Delete') : null,
       )),
     ));
   }
@@ -1482,6 +1587,59 @@ async function viewAdmin(root) {
   }
   cols.appendChild(fc);
   root.appendChild(cols);
+
+  // Danger zone: irreversible deletions, super administrator only.
+  const dz = el('div', { class: 'card danger-zone', style: 'margin-top:18px' });
+  dz.appendChild(el('div', { class: 'card-head' }, el('div', { class: 'grow' },
+    el('h3', {}, '⚠ Data management'),
+    el('p', {}, 'Delete farms, fields, cases, media, drones, grievances and users — or purge all captured data. Every action is recorded in the audit trail and cannot be undone.'))));
+  const dzRow = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' });
+  dzRow.appendChild(el('button', { class: 'btn danger', onclick: () => purgeModal(() => viewAdmin(root.replaceChildren() || root)) }, 'Purge all captured data'));
+  dz.appendChild(dzRow);
+  root.appendChild(dz);
+}
+
+function deleteUserModal(u, done) {
+  const reassign = input('reassign_to', { placeholder: 'Replacement account id (only if required)' });
+  const body = el('div', {},
+    el('p', {}, `Permanently delete ${u.full_name} (${u.email}) and every record they own.`),
+    el('div', { class: 'alert warn' }, 'Some references cannot be cleared. If the account holds any, paste the id of another account to hand them to.'),
+    field('Reassign surviving records to (optional)', reassign, 'Leave blank unless the server reports that a replacement is required.'));
+  const plan = el('div', { class: 'hint' }, 'Checking what this would remove…');
+  body.appendChild(plan);
+  api(`/admin/deletion-plan/${u.id}`).then(p => {
+    const owned = Object.entries(p.owned || {}).map(([k, v]) => `${v.length} ${k}`).join(', ') || 'nothing';
+    plan.textContent = `Owned rows: ${p.owned_total} (${owned}).` +
+      (p.requires_reassign_to?.length ? ` Replacement required for: ${p.requires_reassign_to.join(', ')}.` : '');
+  }).catch(() => { plan.textContent = ''; });
+
+  const m = modal({ title: 'Delete account', body, footer: [
+    el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+    el('button', { class: 'btn danger', onclick: async () => {
+      try {
+        const qs = reassign.value.trim() ? `?reassign_to=${encodeURIComponent(reassign.value.trim())}` : '';
+        await api(`/admin/users/${u.id}${qs}`, { method: 'DELETE' });
+        toast('Account deleted'); m.close(); done();
+      } catch (e) { toast(e.message, 'error'); }
+    } }, 'Delete permanently'),
+  ] });
+}
+
+function purgeModal(done) {
+  const confirmIn = input('confirm', { placeholder: 'Type PURGE' });
+  const body = el('div', {},
+    el('div', { class: 'alert danger' }, 'This removes all farms, fields, cases, media, missions, invoices, notifications and support tickets. Accounts, the knowledge base, products and feature flags are kept.'),
+    field('Type PURGE to confirm', confirmIn));
+  const m = modal({ title: 'Purge all captured data', body, footer: [
+    el('button', { class: 'btn ghost', onclick: () => m.close() }, 'Cancel'),
+    el('button', { class: 'btn danger', onclick: async () => {
+      if (confirmIn.value.trim() !== 'PURGE') { toast('Type PURGE exactly to confirm', 'error'); return; }
+      try {
+        const res = await api('/admin/purge?confirm=PURGE', { method: 'POST' });
+        toast(`Purged ${res.removed_total} rows`); m.close(); done();
+      } catch (e) { toast(e.message, 'error'); }
+    } }, 'Purge everything'),
+  ] });
 }
 
 function createUserModal(done) {
@@ -1493,10 +1651,12 @@ function createUserModal(done) {
   const verifySel = select('verification_status', [
     { value: 'pending', label: 'Pending' }, { value: 'verified', label: 'Verified', selected: true },
   ]);
+  const phoneIn = input('phone', { type: 'tel', placeholder: 'e.g. 98765 43210 (optional)' });
   const body = el('div', {},
     el('div', { class: 'alert info' }, 'Administrators may create accounts with any role, including super administrator. This action is recorded in the audit trail.'),
     field('Email', email), field('Full name', fullname), field('Temporary password', password),
     el('div', { class: 'grid c2' }, field('Role', roleSel), field('Verification', verifySel)),
+    field('Mobile number', phoneIn, 'Optional. Used for SMS and WhatsApp notifications.'),
     field('Preferred language', langSel),
   );
   const m = modal({
@@ -1507,6 +1667,7 @@ function createUserModal(done) {
         try {
           await api('/admin/users', { method: 'POST', body: {
             email: email.value, full_name: fullname.value, password: password.value,
+            phone: phoneIn.value.trim() || null,
             role: roleSel.value, language: langSel.value, verification_status: verifySel.value } });
           toast('User created'); m.close(); done();
         } catch (e) { toast(e.message, 'error'); }
@@ -1679,6 +1840,58 @@ function viewSettings(root) {
   }
   consentCard.appendChild(el('div', { class: 'alert info', style: 'margin-top:12px' }, 'Data minimization and applicable Indian data-protection requirements are enforced server-side.'));
   cols.appendChild(consentCard);
+
+  // Mobile number & messaging: every role, including the super administrator.
+  const msgCard = el('div', { class: 'card' });
+  msgCard.appendChild(el('div', { class: 'card-head' }, el('div', { class: 'grow' },
+    el('h3', {}, 'Mobile number & messaging'),
+    el('p', {}, 'Add or update your mobile number to receive SMS and WhatsApp updates. Indian numbers may be entered without the country code.'))));
+  const phoneIn = input('phone', { type: 'tel', value: ME.phone || '', placeholder: 'e.g. 98765 43210', autocomplete: 'tel' });
+  const phoneForm = el('form', {}, field('Mobile number', phoneIn,
+    'Stored in international format. Leave blank to remove your number.'));
+  const phoneRow = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' });
+  const savePhone = el('button', { class: 'btn', type: 'submit' }, 'Save number');
+  phoneRow.appendChild(savePhone);
+  phoneForm.appendChild(phoneRow);
+  phoneForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const updated = await api('/auth/me', { method: 'PATCH', body: { phone: phoneIn.value.trim() } });
+      ME.phone = updated.phone; ctx.setSession(ME, META);
+      toast(updated.phone ? `Saved ${updated.phone}` : 'Mobile number removed');
+      render();
+    } catch (err) { toast(err.message, 'bad'); }
+  });
+  msgCard.appendChild(phoneForm);
+
+  // Channel + message: sends to your own stored number, with honest status.
+  const chSel = select('channel', [{ value: 'whatsapp', label: 'WhatsApp' }, { value: 'sms', label: 'SMS' }]);
+  const msgBody = el('textarea', { name: 'body', rows: '3', placeholder: 'Message to send to your own number…' });
+  const sendBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Send test message');
+  const msgStatus = el('div', { class: 'hint' }, '');
+  const msgForm = el('form', {}, el('div', { class: 'grid c2' }, field('Channel', chSel), field('Message', msgBody)));
+  msgForm.appendChild(sendBtn);
+  msgForm.appendChild(msgStatus);
+  msgForm.addEventListener('submit', (e) => e.preventDefault());
+  sendBtn.addEventListener('click', async () => {
+    if (!ME.phone) { toast('Add a mobile number first', 'bad'); return; }
+    if (!msgBody.value.trim()) { toast('Type a message first', 'bad'); return; }
+    sendBtn.disabled = true;
+    try {
+      const res = await api('/messaging/send', { method: 'POST', body: { channel: chSel.value, body: msgBody.value.trim() } });
+      msgStatus.textContent = res.delivered
+        ? `Delivered via ${res.channel}.`
+        : `Not delivered — ${res.reason}`;
+      toast(res.delivered ? 'Message delivered' : 'Recorded in-app only', res.delivered ? 'ok' : 'warn');
+    } catch (err) { toast(err.message, 'bad'); }
+    finally { sendBtn.disabled = false; }
+  });
+  msgCard.appendChild(msgForm);
+  api('/messaging/status').then(s => {
+    msgStatus.textContent = s.note || '';
+    if (!s.sms && !s.whatsapp) sendBtn.title = 'Server messaging is not configured';
+  }).catch(() => {});
+  cols.appendChild(msgCard);
 
   // Security: change the signed-in user's own password.
   const pwCard = el('div', { class: 'card' });

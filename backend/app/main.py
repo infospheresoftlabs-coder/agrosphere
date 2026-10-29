@@ -64,6 +64,8 @@ from .security import (
 from .services import ai as ai_service
 from .services import geo
 from .services import weather as weather_service
+from .services import deletion as deletion_service
+from .services import messaging
 from .services.core import (
     create_invoice,
     idempotent,
@@ -77,7 +79,9 @@ from .services.core import (
     verify_webhook,
 )
 from .services.mail import send_password_reset, smtp_configured
+from .services.messaging import dispatch as dispatch_message, messaging_status, normalize_phone
 from .services.reports import build_case_pdf
+from .services.users import delete_user, plan_deletion
 from .services.passwords import (
     RESET_TTL_MINUTES,
     consume_reset_token,
@@ -139,6 +143,7 @@ class RegisterIn(BaseModel):
     password: str = PField(min_length=8, max_length=128)
     role: Role = Role.FARMER
     language: str = "en"
+    phone: str | None = None
 
 
 class ProfileIn(BaseModel):
@@ -282,7 +287,20 @@ class AdminUserCreateIn(BaseModel):
     password: str = PField(min_length=8, max_length=128)
     role: Role = Role.FARMER
     language: str = "en"
+    phone: str | None = None
     verification_status: str = PField(default="pending", pattern="^(pending|verified|rejected)$")
+
+
+class MessageIn(BaseModel):
+    body: str = PField(min_length=1, max_length=1000)
+    channel: str = PField(default="whatsapp", pattern="^(whatsapp|sms)$")
+
+
+class AdminMessageIn(BaseModel):
+    body: str = PField(min_length=1, max_length=1000)
+    channel: str = PField(default="whatsapp", pattern="^(whatsapp|sms)$")
+    # When omitted, the message goes to every account that has a stored number.
+    user_id: str | None = None
 
 
 class AdvisorIn(BaseModel):
@@ -382,6 +400,7 @@ def meta() -> dict:
         ],
         "transitions": {s.value: sorted(t.value for t in targets) for s, targets in TRANSITIONS.items()},
         "ai": ai_service.provider_status(),
+        "messaging": messaging_status(),
         "maps": {
             "provider": settings.maps_provider,
             "api_key": settings.geoapify_api_key,
@@ -472,6 +491,7 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> dict:
         password_hash=hash_password(payload.password),
         role=payload.role.value,
         language=payload.language,
+        phone=normalize_phone(payload.phone),
         avatar_image=f"role_{payload.role.value}",
         verification_status="pending",
     )
@@ -580,8 +600,18 @@ def password_change(
 def update_me(payload: ProfileIn, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     for field in ("full_name", "phone", "language", "theme"):
         value = getattr(payload, field)
-        if value is not None:
-            setattr(user, field, value)
+        if value is None:
+            continue
+        if field == "phone":
+            if value == "":
+                # An empty string clears the number.
+                user.phone = None
+                continue
+            normalized = normalize_phone(value)
+            if not normalized:
+                raise HTTPException(422, "That does not look like a valid mobile number")
+            value = normalized
+        setattr(user, field, value)
     record_audit(db, actor=user, action="user.profile_updated", entity="user", entity_id=user.id)
     db.commit()
     return _user_out(user)
@@ -729,7 +759,8 @@ def _media_out(m: MediaAsset) -> dict:
 @app.post("/api/media", tags=["Media"], status_code=201)
 def register_media(
     payload: MediaIn,
-    user: User = Depends(require_roles(Role.FARMER, Role.FARM_MANAGER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     if not db.get(Field, payload.field_id):
@@ -751,7 +782,8 @@ def register_media(
 @app.post("/api/media/upload", tags=["Media"])
 async def upload_media(
     file: UploadFile = File(...),
-    user: User = Depends(require_roles(Role.FARMER, Role.FARM_MANAGER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
 ) -> dict:
     """Validate an uploaded file without persisting it to public storage."""
     raw = await file.read()
@@ -935,7 +967,8 @@ def get_case(case_id: str, user: User = Depends(current_user), db: Session = Dep
 @app.post("/api/cases", tags=["Cases"], status_code=201)
 def create_case(
     payload: CaseIn,
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     if not db.get(Field, payload.field_id):
@@ -946,7 +979,9 @@ def create_case(
         field_id=payload.field_id,
         farmer_id=user.id,
         agronomist_id=_first_user_id(db, Role.AGRONOMIST),
-        manager_id=_first_user_id(db, Role.FARM_MANAGER),
+        manager_id=_first_user_id(db, Role.FARM_MANAGER) or (
+            user.id if user.role == Role.FARM_MANAGER.value else None
+        ),
         state=CaseState.DRAFT.value,
         title=payload.title,
         observations=payload.observations,
@@ -968,7 +1003,8 @@ def _first_user_id(db: Session, role: Role) -> str | None:
 @app.post("/api/cases/{case_id}/capture", tags=["Cases"])
 def capture_imagery(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -982,7 +1018,8 @@ def capture_imagery(
 @app.post("/api/cases/{case_id}/analyze", tags=["Cases"])
 def run_analysis(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER, Role.AGRONOMIST, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1028,7 +1065,8 @@ def run_analysis(
 @app.post("/api/cases/{case_id}/submit", tags=["Cases"])
 def submit_for_review(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1180,7 +1218,7 @@ def submit_costing(
 def choose_implementation(
     case_id: str,
     payload: ChoiceIn,
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(Role.FARMER, Role.FARM_MANAGER, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1333,7 +1371,8 @@ def job_complete(
 @app.post("/api/cases/{case_id}/follow-up", tags=["Cases"])
 def follow_up(
     case_id: str,
-    user: User = Depends(require_roles(Role.AGRONOMIST, Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.AGRONOMIST, Role.FARMER, Role.FARM_MANAGER, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1348,7 +1387,8 @@ def follow_up(
 def close_case(
     case_id: str,
     outcome: str = Query(default=""),
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1363,7 +1403,8 @@ def close_case(
 @app.post("/api/cases/{case_id}/reopen", tags=["Cases"])
 def reopen_case(
     case_id: str,
-    user: User = Depends(require_roles(Role.FARMER, Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(
+        Role.FARMER, Role.FARM_MANAGER, Role.AGRONOMIST, Role.DRONE_OPERATOR, Role.SUPER_ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     case = db.get(Case, case_id)
@@ -1531,6 +1572,76 @@ def read_notification(
     n.read = True
     db.commit()
     return {"id": n.id, "read": True}
+
+
+@app.get("/api/messaging/status", tags=["Notifications"])
+def messaging_status_endpoint(user: User = Depends(current_user)) -> dict:
+    """Whether SMS / WhatsApp dispatch is configured, and the caller's number."""
+    return {**messaging_status(), "phone": user.phone,
+            "phone_ready": bool(user.phone)}
+
+
+@app.post("/api/messaging/send", tags=["Notifications"])
+def send_message(
+    payload: MessageIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Send the caller an SMS or WhatsApp message to their stored number.
+
+    The destination is always the signed-in account's own number: this endpoint
+    cannot be used to message an arbitrary third party. A copy is recorded in the
+    in-app notification feed with honest delivery evidence.
+    """
+    if not user.phone:
+        raise HTTPException(422, "Add a mobile number in Settings before sending messages")
+    result = dispatch_message(user.phone, payload.body, channel=payload.channel)
+    notify(
+        db, user_id=user.id,
+        title=f"{payload.channel.title()} message",
+        body=payload.body,
+        category="system",
+        delivered=result["delivered"],
+        delivery_evidence=(result.get("evidence") if result["delivered"] else None),
+    )
+    record_audit(db, actor=user, action="message.dispatched", entity="user", entity_id=user.id,
+                 detail={"channel": payload.channel, "delivered": result["delivered"]})
+    db.commit()
+    return result
+
+
+@app.post("/api/admin/messaging/send", tags=["Administration"])
+def admin_send_message(
+    payload: AdminMessageIn,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.FARM_MANAGER)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Message one account, or every account with a stored number, over SMS/WhatsApp."""
+    recipients: list[User] = []
+    if payload.user_id:
+        target = db.get(User, payload.user_id)
+        if not target:
+            raise HTTPException(404, "User not found")
+        recipients = [target]
+    else:
+        recipients = list(db.execute(select(User).where(User.phone.is_not(None))).scalars().all())
+
+    sent, skipped = [], []
+    for r in recipients:
+        if not r.phone:
+            skipped.append({"user_id": r.id, "reason": "no phone number"})
+            continue
+        res = dispatch_message(r.phone, payload.body, channel=payload.channel)
+        notify(db, user_id=r.id, title=f"{payload.channel.title()} message", body=payload.body,
+               category="system", delivered=res["delivered"],
+               delivery_evidence=res.get("evidence") if res["delivered"] else None)
+        (sent if res["delivered"] else skipped).append(
+            {"user_id": r.id, "delivered": res["delivered"], "reason": res.get("reason")})
+    record_audit(db, actor=user, action="message.broadcast", entity="user",
+                 detail={"channel": payload.channel, "sent": len(sent), "skipped": len(skipped)})
+    db.commit()
+    return {"channel": payload.channel, "sent": sent, "skipped": skipped,
+            "delivered_count": len(sent)}
 
 
 @app.get("/api/grievances", tags=["Support"])
@@ -2204,6 +2315,7 @@ def admin_create_user(
         password_hash=hash_password(payload.password),
         role=payload.role.value,
         language=payload.language,
+        phone=normalize_phone(payload.phone),
         avatar_image=f"role_{payload.role.value}",
         verification_status=payload.verification_status,
     )
@@ -2279,7 +2391,7 @@ def revoke_sessions(
 def verify_user(
     user_id: str,
     decision: str = Query(default="verified", pattern="^(verified|rejected)$"),
-    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.FARM_MANAGER)),
     db: Session = Depends(get_db),
 ) -> dict:
     target = db.get(User, user_id)
@@ -2292,6 +2404,290 @@ def verify_user(
            body=f"Your professional verification is now '{decision}'.", category="account")
     db.commit()
     return _user_out(target)
+
+
+@app.delete("/api/admin/users/{user_id}", tags=["Administration"])
+def admin_delete_user(
+    user_id: str,
+    reassign_to: str | None = Query(default=None),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete an account and everything it owns, FK-safe and audited.
+
+    Guard rails mirror the role endpoint: an administrator cannot delete
+    themselves, and the last remaining super administrator cannot be removed.
+    Some references (for example ``case.agronomist_id``) are NOT NULL and cannot
+    be cleared, so when the account holds any, a replacement account id must be
+    supplied via ``reassign_to``.
+    """
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.id == user.id:
+        raise HTTPException(409, "You cannot delete your own account")
+    if target.role == Role.SUPER_ADMIN.value:
+        remaining = db.execute(
+            select(func.count(User.id)).where(
+                User.role == Role.SUPER_ADMIN.value, User.id != target.id
+            )
+        ).scalar_one()
+        if remaining == 0:
+            raise HTTPException(409, "At least one super administrator must remain")
+
+    replacement = db.get(User, reassign_to) if reassign_to else None
+    if reassign_to and not replacement:
+        raise HTTPException(404, "Replacement account not found")
+    if replacement and replacement.id == target.id:
+        raise HTTPException(409, "Replacement account must be a different user")
+
+    try:
+        plan = delete_user(db, target, actor=replacement)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return {
+        "deleted": True,
+        "user_id": plan.user_id,
+        "email": plan.email,
+        "owned_rows": plan.owned_total,
+        "reassigned": plan.reassigned,
+        "audit_events_deidentified": plan.deidentified.get("audit_event.actor_id", 0),
+    }
+
+
+@app.get("/api/admin/deletion-plan/{user_id}", tags=["Administration"])
+def admin_deletion_plan(
+    user_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Preview what deleting an account would remove or reassign."""
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    plan = plan_deletion(db, target)
+    return {
+        "user_id": plan.user_id, "email": plan.email, "role": plan.role,
+        "owned": plan.owned, "owned_total": plan.owned_total,
+        "reassigned": plan.reassigned, "deidentified": plan.deidentified,
+        "requires_reassign_to": plan.requires_actor,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Destructive operations (super administrator only)
+# --------------------------------------------------------------------------- #
+@app.delete("/api/farms/{farm_id}", tags=["Farms"])
+def delete_farm_endpoint(
+    farm_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete a farm with its fields, cases, media and downstream records."""
+    farm = db.get(Farm, farm_id)
+    if not farm:
+        raise HTTPException(404, "Farm not found")
+    result = deletion_service.delete_farm(db, farm, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "farm", "id": farm_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/fields/{field_id}", tags=["Farms"])
+def delete_field_endpoint(
+    field_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    field = db.get(Field, field_id)
+    if not field:
+        raise HTTPException(404, "Field not found")
+    result = deletion_service.delete_field(db, field, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "field", "id": field_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/cases/{case_id}", tags=["Cases"])
+def delete_case_endpoint(
+    case_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete a crop-health case and its report data."""
+    case = db.get(Case, case_id)
+    if not case:
+        raise HTTPException(404, "Case not found")
+    result = deletion_service.delete_case(db, case, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "case", "id": case_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/media/{media_id}", tags=["Media"])
+def delete_media_endpoint(
+    media_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    asset = db.get(MediaAsset, media_id)
+    if not asset:
+        raise HTTPException(404, "Media asset not found")
+    result = deletion_service.delete_media(db, asset, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "media", "id": media_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/drones/{drone_id}", tags=["Drone Operations"])
+def delete_drone_endpoint(
+    drone_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = db.get(DroneDevice, drone_id)
+    if not device:
+        raise HTTPException(404, "Drone not found")
+    result = deletion_service.delete_drone(db, device, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "drone", "id": drone_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/grievances/{grievance_id}", tags=["Support"])
+def delete_grievance_endpoint(
+    grievance_id: str,
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    g = db.get(Grievance, grievance_id)
+    if not g:
+        raise HTTPException(404, "Grievance not found")
+    result = deletion_service.delete_grievance(db, g, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "grievance", "id": grievance_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.delete("/api/notifications/{notification_id}", tags=["Notifications"])
+def delete_notification_endpoint(
+    notification_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    n = db.get(Notification, notification_id)
+    if not n:
+        raise HTTPException(404, "Notification not found")
+    if n.user_id != user.id and user.role != Role.SUPER_ADMIN.value:
+        raise HTTPException(403, "Not your notification")
+    result = deletion_service.delete_notification(db, n, actor=user)
+    db.commit()
+    return {"deleted": True, "entity": "notification", "id": notification_id,
+            "label": result.label, "removed": result.removed}
+
+
+@app.post("/api/admin/purge", tags=["Administration"])
+def admin_purge(
+    confirm: str = Query(default="", description="Must equal 'PURGE' to proceed"),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete all app-captured operational data, keeping accounts and knowledge.
+
+    Irreversible, so it requires an explicit confirmation string. Accounts, the
+    verified knowledge base, products and feature flags are preserved.
+    """
+    if confirm != "PURGE":
+        raise HTTPException(400, "Confirmation required: pass confirm=PURGE")
+    result = deletion_service.purge_operational_data(db, actor=user)
+    db.commit()
+    return {"purged": True, "removed": result.removed, "removed_total": result.removed_total}
+
+
+# --------------------------------------------------------------------------- #
+# Verification queue (super administrator + farm manager)
+# --------------------------------------------------------------------------- #
+@app.get("/api/admin/verifications", tags=["Administration"])
+def verification_queue(
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.FARM_MANAGER)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Unverified users, drones and user-submitted media, in one queue.
+
+    Super administrators and farm managers can clear the whole queue from here,
+    so an operator, device or capture is not left waiting on a single reviewer.
+    """
+    users = db.execute(
+        select(User).where(User.verification_status != "verified")
+    ).scalars().all()
+    drones = db.execute(select(DroneDevice).where(DroneDevice.verified.is_(False))).scalars().all()
+    media = db.execute(
+        select(MediaAsset).where(MediaAsset.source.in_(("device", "simulated")))
+        .order_by(MediaAsset.created_at.desc()).limit(100)
+    ).scalars().all()
+    return {
+        "users": [
+            {"id": u.id, "full_name": u.full_name, "email": u.email, "role": u.role,
+             "verification_status": u.verification_status, "avatar_image": u.avatar_image,
+             "created_at": u.created_at.isoformat() if u.created_at else None}
+            for u in users
+        ],
+        "drones": [
+            {"id": d.id, "model": d.model, "serial": d.serial, "operator_id": d.operator_id,
+             "verified": d.verified, "availability": d.availability}
+            for d in drones
+        ],
+        "media": [_media_out(m) for m in media],
+    }
+
+
+@app.post("/api/drones/{drone_id}/verify", tags=["Drone Operations"])
+def verify_drone(
+    drone_id: str,
+    decision: bool = Query(default=True),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.FARM_MANAGER)),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = db.get(DroneDevice, drone_id)
+    if not device:
+        raise HTTPException(404, "Drone not found")
+    device.verified = decision
+    record_audit(db, actor=user, action="drone.verified", entity="drone", entity_id=device.id,
+                 detail={"verified": decision})
+    if device.operator_id:
+        notify(db, user_id=device.operator_id, title="Drone verification update",
+               body=f"Drone {device.model} (SN {device.serial}) is now "
+                    f"{'verified' if decision else 'not verified'}.",
+               category="mission")
+    db.commit()
+    return {"id": device.id, "verified": device.verified}
+
+
+@app.post("/api/media/{media_id}/verify", tags=["Media"])
+def verify_media(
+    media_id: str,
+    decision: str = Query(default="verified", pattern="^(verified|rejected)$"),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.FARM_MANAGER)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Accept or reject a captured image/video record after review."""
+    asset = db.get(MediaAsset, media_id)
+    if not asset:
+        raise HTTPException(404, "Media asset not found")
+    asset.quality_score = 0.9 if decision == "verified" else 0.3
+    asset.quality_notes = (
+        "Verified by reviewer: resolution, format and sharpness within range"
+        if decision == "verified"
+        else "Rejected by reviewer: quality or provenance not accepted"
+    )
+    record_audit(db, actor=user, action="media.verified", entity="media", entity_id=asset.id,
+                 detail={"decision": decision})
+    if asset.uploaded_by:
+        notify(db, user_id=asset.uploaded_by, title="Capture reviewed",
+               body=f"Your capture '{asset.filename}' was {decision}.", category="workflow")
+    db.commit()
+    return _media_out(asset)
 
 
 @app.get("/api/admin/flags", tags=["Administration"])
