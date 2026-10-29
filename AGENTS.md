@@ -29,6 +29,25 @@ server, never against the deployed instance, and clean up probe accounts after
 Two geocoding assertions fail without `GEOAPIFY_API_KEY` (503 by design — see
 `backend/app/services/geo.py`). That is expected in a bare sandbox.
 
+## Deploy
+
+Render service `agrosphere` (`srv-dbh80ogn74is73bo79qg`), blueprint in
+`render.yaml`, `autoDeploy: true`. In practice auto-deploy does **not** fire on
+push to `main`, and no deploy hook is stored in the repo or environment.
+
+To ship a change, one of these is required — ask the user:
+
+- a Render API key (`RENDER_API_KEY`), then
+  `POST https://api.render.com/v1/services/srv-dbh80ogn74is73bo79qg/deploys`
+  with body `{"clearCache": "do_not_clear"}`; or
+- the service's Deploy Hook URL (Render → service → Settings → Deploy Hook),
+  which can be `curl`ed; or
+- the user clicks **Manual Deploy** in the Render dashboard.
+
+Verify a deploy landed by probing behaviour, not just `/api/health`:
+`curl -X PATCH .../api/admin/users/x` returns 405 before the edit route ships
+and 401/403 after. Check `git rev-parse origin/main` matches the deployed commit.
+
 ## Layout
 
 - `backend/app/main.py` — every route. Role gating uses `require_roles(...)`.
